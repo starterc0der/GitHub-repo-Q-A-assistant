@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from rank_bm25 import BM25Okapi
 
 from src.index.chunk_index import ChunkIndex
 from src.index.embedder import Embedder
 from src.index.schema import CodeChunk
+
+
+@dataclass
+class ScoredChunk:
+    """A candidate chunk with its per-signal scores, for inspecting the fusion step."""
+
+    chunk: CodeChunk
+    dense_score: float
+    bm25_score: float
+    fused_score: float
 
 
 class RankFuser:
@@ -38,6 +50,11 @@ class HybridSearch:
         self.fuser = fuser
 
     def search(self, question: str, repo: str, file_paths: list[str], k: int) -> list[CodeChunk]:
+        return [sc.chunk for sc in self.search_scored(question, repo, file_paths, k)]
+
+    def search_scored(
+        self, question: str, repo: str, file_paths: list[str], k: int
+    ) -> list[ScoredChunk]:
         candidates = self.chunk_index.fetch_by_files(repo, file_paths)
         if not candidates:
             return []
@@ -48,8 +65,13 @@ class HybridSearch:
         bm25_scores = list(bm25.get_scores(question.split()))
 
         fused = self.fuser.fuse(dense_scores, bm25_scores)
-        ranked = sorted(zip(fused, chunks), key=lambda pair: pair[0], reverse=True)
-        return [chunk for _, chunk in ranked[:k]]
+        ranked = sorted(
+            zip(fused, dense_scores, bm25_scores, chunks), key=lambda t: t[0], reverse=True
+        )
+        return [
+            ScoredChunk(chunk=chunk, dense_score=dense, bm25_score=bm25_, fused_score=fused_)
+            for fused_, dense, bm25_, chunk in ranked[:k]
+        ]
 
     def _cosine_scores(
         self, query_vector: list[float], vectors: tuple[list[float], ...]

@@ -1,4 +1,4 @@
-.PHONY: serve ingest test
+.PHONY: serve ingest test up
 
 serve:
 	uvicorn src.api.main:app --reload
@@ -8,3 +8,6 @@ ingest:
 
 test:
 	pytest tests/
+
+up:
+	docker compose up --build

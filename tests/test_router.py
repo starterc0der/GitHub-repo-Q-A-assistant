@@ -30,3 +30,18 @@ def test_route_to_files_returns_nearest_summary_scoped_to_repo() -> None:
     files = router.route_to_files("how do we parse input?", repo="demo", top_files=1)
 
     assert files == ["a.py"]
+
+
+def test_route_to_files_scored_returns_file_path_and_score_pairs() -> None:
+    doc_index = DocIndex(VectorStore(":memory:"))
+    doc_index.ensure(dim=2)
+    doc_index.upsert(
+        [FileSummary(repo="demo", file_path="a.py", language="python", summary="parses input")],
+        [[1.0, 0.0]],
+    )
+    router = Router(FakeEmbedder({"how do we parse input?": [1.0, 0.0]}), doc_index)
+
+    results = router.route_to_files_scored("how do we parse input?", repo="demo", top_files=1)
+
+    assert results[0][0] == "a.py"
+    assert results[0][1] > 0

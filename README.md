@@ -168,6 +168,28 @@ make test
 
 ---
 
+## UI — RAG Pipeline Visualizer
+
+A React frontend (`frontend/`) that walks through ingestion and retrieval
+stage by stage — clone → walk → chunk → contextualize → embed on one tab,
+embed question → route → hybrid search → rerank → compress → final prompt on
+the other — with a 2D projection of the embedding space at each step. It
+calls trace endpoints (`/ingest/trace(/stream)`, `/query/trace`, `/repos`)
+that mirror the real pipeline but stop before the LLM generation call, so you
+see exactly what would be sent without spending a generation.
+
+```bash
+# with the backend already running (make serve)
+cd frontend
+npm install
+npm run dev   # http://localhost:5183
+```
+
+Or via `docker compose up -d`, which starts Qdrant, the backend, and the
+frontend together (frontend on port 5183).
+
+---
+
 ## Design decisions & trade-offs
 
 - **Local-first stack.** The pipeline is written against `Embedder` /
@@ -198,5 +220,7 @@ make test
   `ragas` comparison against a naive baseline (fixed-size chunking, no
   routing/rerank/compression) — that's the natural next milestone to
   quantify what each stage is actually worth.
-- **No UI.** Currently CLI (`ingest`) + FastAPI (`/query`) only; a chat
-  front-end with a sources panel is unbuilt.
+- **Visualizer, not a chat UI.** The frontend traces and displays every
+  pipeline stage up through the final assembled prompt, but stops short of
+  calling the LLM — there's no chat window that shows a generated, cited
+  answer yet.

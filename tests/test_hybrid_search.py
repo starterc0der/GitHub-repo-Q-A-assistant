@@ -75,3 +75,20 @@ def test_search_returns_empty_when_no_candidates() -> None:
     search = HybridSearch(FakeEmbedder({}), chunk_index, RankFuser(1.0, 0.25))
 
     assert search.search("anything", repo="demo", file_paths=[], k=5) == []
+
+
+def test_search_scored_exposes_dense_bm25_and_fused_scores() -> None:
+    chunk_index = ChunkIndex(VectorStore(":memory:"))
+    chunk_index.ensure(dim=2)
+    chunk_index.upsert(
+        [_chunk("a.py", "def parse_input(): pass"), _chunk("b.py", "def write_output(): pass")],
+        [[1.0, 0.0], [0.0, 1.0]],
+    )
+    embedder = FakeEmbedder({"parse input": [1.0, 0.0]})
+    search = HybridSearch(embedder, chunk_index, RankFuser(1.0, 0.25))
+
+    results = search.search_scored("parse input", repo="demo", file_paths=[], k=2)
+
+    assert [sc.chunk.file_path for sc in results] == ["a.py", "b.py"]
+    assert results[0].dense_score > results[1].dense_score
+    assert results[0].fused_score >= results[1].fused_score

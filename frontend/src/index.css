@@ -1,0 +1,46 @@
+:root {
+  --bg: oklch(98% 0.004 95);
+  --panel: oklch(100% 0 0);
+  --panel-2: oklch(96.5% 0.006 95);
+  --ink: oklch(23% 0.02 270);
+  --ink-dim: oklch(48% 0.02 270);
+  --ink-faint: oklch(62% 0.015 270);
+  --border: oklch(90% 0.006 95);
+  --border-strong: oklch(84% 0.008 95);
+
+  --accent: oklch(58% 0.16 252);
+  --accent-ink: oklch(30% 0.14 252);
+  --accent-soft: oklch(94% 0.03 252);
+  --accent-border: oklch(80% 0.06 252);
+
+  --accent2: oklch(60% 0.13 165);
+  --accent2-ink: oklch(32% 0.1 165);
+  --accent2-soft: oklch(94% 0.035 165);
+  --accent2-border: oklch(80% 0.06 165);
+
+  --warn: oklch(62% 0.16 40);
+  --warn-soft: oklch(94% 0.04 40);
+  --warn-border: oklch(80% 0.07 40);
+
+  --code-bg: oklch(97% 0.012 90);
+
+  --sans: "Public Sans", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 15px/1.5 var(--sans);
+  color: var(--ink);
+  background: var(--bg);
+}
+#root { height: 100%; }
+h1, h2, h3 { font-family: var(--sans); color: var(--ink); }
+a { color: var(--accent-ink); }
+a:hover { color: var(--accent); }
+button { font: inherit; cursor: pointer; }
+input { font: inherit; }
+.rag-mono { font-family: var(--mono); }
+.rag-dim { color: var(--ink-dim); }
+.rag-hint { color: var(--ink-dim); font-size: 13px; margin: 8px 0; }

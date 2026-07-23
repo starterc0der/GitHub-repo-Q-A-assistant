@@ -74,13 +74,13 @@ class AnswerGenerator:
         self.citation_parser = citation_parser
 
     def answer(self, question: str, chunks: list[CodeChunk]) -> Answer:
-        prompt = self._build_prompt(question, chunks)
+        prompt = self.build_prompt(question, chunks)
         text = self.llm.complete(prompt, system=SYSTEM_PROMPT)
         citations = self.citation_parser.parse(text, chunks)
         confidence = 1.0 if citations else 0.3
         return Answer(text=text, citations=citations, confidence=confidence)
 
-    def _build_prompt(self, question: str, chunks: list[CodeChunk]) -> str:
+    def build_prompt(self, question: str, chunks: list[CodeChunk]) -> str:
         context = "\n\n".join(
             f"[{chunk.file_path}:L{chunk.start_line}-L{chunk.end_line}]\n{chunk.code}"
             for chunk in chunks

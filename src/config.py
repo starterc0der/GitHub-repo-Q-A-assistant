@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
     repo_clone_dir: str = "./data/repos"
+    # Cached ingest traces, keyed by repo name — lets a previously-ingested repo be
+    # reselected in the UI without re-cloning/re-summarizing/re-embedding.
+    ingest_cache_dir: str = "./data/ingest_cache"
     chunk_max_chars: int = 2000
     chunk_overlap: int = 200
 

@@ -5,3 +5,40 @@ services:
       - "6333:6333"
     volumes:
       - ./qdrant_storage:/qdrant/storage
+
+  backend:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Container-network addresses — override whatever .env has for these two.
+      QDRANT_URL: http://qdrant:6333
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      REPO_CLONE_DIR: /app/data/repos
+      INGEST_CACHE_DIR: /app/data/ingest_cache
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # lets the container reach Ollama on the host
+    volumes:
+      # Named volumes, not host bind-mounts: cloned repos, cached ingest traces, and
+      # downloaded models are scratch/cache data owned by the container's (root) user —
+      # bind-mounting them into ./data/... would leave root-owned files on the host.
+      - repo_data:/app/data/repos
+      - ingest_cache:/app/data/ingest_cache
+      - hf_cache:/root/.cache/huggingface # avoids re-downloading embedding/reranker models
+    depends_on:
+      - qdrant
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5183:5183"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  hf_cache:
+  repo_data:
+  ingest_cache:

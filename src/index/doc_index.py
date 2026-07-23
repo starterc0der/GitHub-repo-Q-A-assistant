@@ -32,11 +32,27 @@ class DocIndex:
         self.store.upsert(COLLECTION_NAME, points)
 
     def search(self, vector: list[float], limit: int, repo: str) -> list[FileSummary]:
+        return [summary for summary, _ in self.search_scored(vector, limit, repo)]
+
+    def search_scored(
+        self, vector: list[float], limit: int, repo: str
+    ) -> list[tuple[FileSummary, float]]:
         repo_filter = Filter(
             must=[qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo))]
         )
         results = self.store.search(COLLECTION_NAME, vector, limit, query_filter=repo_filter)
-        return [self._to_summary(point) for point in results]
+        return [(self._to_summary(point), point.score) for point in results]
+
+    def all_vectors(self, repo: str) -> list[tuple[FileSummary, list[float]]]:
+        """Every file summary + its vector for a repo — used to build the routing-stage
+        vector-space visualization, which needs the whole corpus, not just top-k matches."""
+        repo_filter = Filter(
+            must=[qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo))]
+        )
+        records = self.store.scroll(
+            COLLECTION_NAME, query_filter=repo_filter, limit=10_000, with_vectors=True
+        )
+        return [(self._to_summary(record), record.vector) for record in records]
 
     def _to_payload(self, s: FileSummary) -> dict[str, object]:
         return {
@@ -47,7 +63,7 @@ class DocIndex:
             "symbols": s.symbols,
         }
 
-    def _to_summary(self, point: qmodels.ScoredPoint) -> FileSummary:
+    def _to_summary(self, point: qmodels.ScoredPoint | qmodels.Record) -> FileSummary:
         payload = point.payload
         return FileSummary(
             repo=payload["repo"],
