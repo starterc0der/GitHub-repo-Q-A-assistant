@@ -55,3 +55,9 @@ export function queryTrace(question, repo) {
 export function listRepos() {
   return request("/repos");
 }
+
+// Replays a stored ingest trace by repo name. Cache-only on the server, so selecting a
+// previously-ingested repo is instant and never re-runs clone/summarize/embed.
+export function cachedIngestTrace(repo) {
+  return request(`/repos/${encodeURIComponent(repo)}/trace`);
+}

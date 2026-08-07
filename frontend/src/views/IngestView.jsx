@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 import { RagChunkCard, RagEmbedding, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
 import { RagVectorSpace, pointsForIngestChunks } from "../components/RagVectorSpace.jsx";
 
@@ -11,6 +11,22 @@ export const INGEST_STAGES = [
 ];
 
 const MAX_FILES_SHOWN = 8;
+
+// Big repos render hundreds of files; showing them all at once is a slow, unscrollable
+// wall. Default to a slice, but let the whole set be expanded — the summary and context
+// header for *every* file are in the payload, so nothing here is a fetch.
+function useFileSlice(files) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? files : files.slice(0, MAX_FILES_SHOWN);
+  const hidden = files.length - shown.length;
+  const toggle =
+    files.length <= MAX_FILES_SHOWN ? null : (
+      <button className="rag-more-btn" onClick={() => setExpanded(!expanded)}>
+        {expanded ? `Show first ${MAX_FILES_SHOWN} files only` : `Show all ${files.length} files`}
+      </button>
+    );
+  return { shown, hidden, toggle };
+}
 
 function totalChunks(data) {
   return data.files.reduce((n, f) => n + f.chunks.length, 0);
@@ -53,8 +69,7 @@ export function IngestStageList({ data, statuses, current, onSelect }) {
 }
 
 export function IngestSections({ data, visible }) {
-  const shown = data.files.slice(0, MAX_FILES_SHOWN);
-  const hiddenCount = data.files.length - shown.length;
+  const { shown, hidden: hiddenCount, toggle } = useFileSlice(data.files);
 
   return (
     <Fragment>
@@ -127,6 +142,7 @@ export function IngestSections({ data, visible }) {
             </div>
           ))}
           {hiddenCount > 0 && <p className="rag-hint">+ {hiddenCount} more files chunked the same way.</p>}
+          {toggle}
         </RagSection>
       )}
 
@@ -154,6 +170,10 @@ export function IngestSections({ data, visible }) {
               ))}
             </div>
           ))}
+          {hiddenCount > 0 && (
+            <p className="rag-hint">+ {hiddenCount} more files summarized the same way.</p>
+          )}
+          {toggle}
         </RagSection>
       )}
 
@@ -168,7 +188,7 @@ export function IngestSections({ data, visible }) {
           <RagVectorSpace
             {...pointsForIngestChunks(data)}
             legend={[{ tone: "neutral", label: "chunk embedding · hover for file" }]}
-            caption="Every chunk from this ingest, projected to 2D via PCA. Chunks from the same file tend to land close together — this is the space hybrid search and reranking will search over."
+            caption="Every chunk from this ingest, projected to 3D via PCA — drag to rotate. Chunks from the same file tend to land close together; the third axis separates points that would overlap in a flat plot. This is the space hybrid search and reranking will search over."
           />
           {shown.map((file) => (
             <div className="rag-file" key={file.file_path}>
@@ -187,6 +207,7 @@ export function IngestSections({ data, visible }) {
           <p className="rag-hint">
             → chunks collection, {totalChunks(data)} vectors upserted{hiddenCount > 0 ? ` (showing first ${MAX_FILES_SHOWN} files)` : ""}.
           </p>
+          {toggle}
         </RagSection>
       )}
     </Fragment>

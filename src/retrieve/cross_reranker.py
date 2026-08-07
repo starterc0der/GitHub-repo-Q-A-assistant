@@ -11,8 +11,11 @@ class CrossReranker:
     Lazy-loads the model on first use, mirroring Embedder's pattern.
     """
 
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, min_top_score: float = 0.0):
         self.model_name = model_name
+        # Gates the whole list on the best score, not each chunk: supporting context
+        # legitimately scores low, so a per-chunk floor threw away useful chunks.
+        self.min_top_score = min_top_score
         self._model: CrossEncoder | None = None
 
     @property
@@ -30,6 +33,8 @@ class CrossReranker:
         if not chunks:
             return []
         pairs = [(question, chunk.embeddable_text) for chunk in chunks]
-        scores = self.model.predict(pairs)
+        scores = self.model.predict(pairs, show_progress_bar=False)
         ranked = sorted(zip(scores, chunks), key=lambda pair: pair[0], reverse=True)
+        if float(ranked[0][0]) < self.min_top_score:
+            return []  # nothing here answers the question — reject the whole list
         return [(chunk, float(score)) for score, chunk in ranked[:top_k]]

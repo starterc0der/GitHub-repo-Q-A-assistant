@@ -21,7 +21,7 @@ class Embedder:
         return self.model.get_sentence_embedding_dimension()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return self.model.encode(texts, convert_to_numpy=True).tolist()
+        return self.model.encode(texts, convert_to_numpy=True, show_progress_bar=False).tolist()
 
     def embed_one(self, text: str) -> list[float]:
         return self.embed([text])[0]

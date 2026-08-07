@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from dataclasses import asdict
 
-from fastapi import APIRouter
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+from qdrant_client.http.exceptions import UnexpectedResponse
 
+from src.cancellation import Cancelled, reset_canceller, set_canceller
 from src.config import settings
 from src.ingest_cache import IngestCache
 from src.pipeline import Pipeline
@@ -85,6 +90,20 @@ def list_repos() -> dict[str, object]:
     return {"repos": ingest_cache.list_repos()}
 
 
+@router.get("/repos/{repo}/trace")
+def cached_ingest_trace(repo: str) -> dict[str, object]:
+    """Replay a previously-ingested repo's trace by name, for the ingest-tab picker.
+
+    Deliberately not under /ingest/trace/{repo}: that would shadow the literal
+    /ingest/trace/stream route below it. Cache-only — never re-ingests, so selecting a
+    repo here costs nothing and can't fire LLM calls.
+    """
+    cached = ingest_cache.load(repo)
+    if cached is None:
+        raise HTTPException(status_code=404, detail=f"No cached ingest for {repo!r}")
+    return cached
+
+
 @router.get("/ingest/trace/stream")
 def ingest_trace_stream(url: str) -> StreamingResponse:
     """Same ingest as POST /ingest/trace, but streams progress via Server-Sent Events —
@@ -118,8 +137,60 @@ def ingest_trace_stream(url: str) -> StreamingResponse:
     return StreamingResponse(events(), media_type="text/event-stream")
 
 
+async def _run_cancellable(request: Request, work: Callable[[], object]) -> object:
+    """Run blocking pipeline work in a threadpool, aborting it if the client goes away.
+
+    Cooperative, since threads can't be killed: work stops at its next checkpoint, which
+    frees the rate-limit budget instead of holding it for a full retry backoff.
+    """
+    cancelled = threading.Event()
+
+    async def watch_client() -> None:
+        while not cancelled.is_set():
+            if await request.is_disconnected():
+                cancelled.set()
+                return
+            await asyncio.sleep(0.4)
+
+    def runner() -> object:
+        token = set_canceller(cancelled.is_set)
+        try:
+            return work()
+        finally:
+            reset_canceller(token)
+
+    watcher = asyncio.create_task(watch_client())
+    try:
+        return await run_in_threadpool(runner)
+    finally:
+        cancelled.set()  # stop the poller whichever way we exited
+        watcher.cancel()
+
+
 @router.post("/query/trace")
-def query_trace(request: QueryRequest) -> dict[str, object]:
-    """Same retrieval as /query, but stops before the answer LLM call and returns every
-    stage's intermediate chunks/scores — powers the pipeline-visualization UI."""
-    return asdict(pipeline.query_trace(request.question, request.repo))
+async def query_trace(request: Request, body: QueryRequest) -> Response:
+    """Same retrieval as /query, returning every stage's intermediate chunks/scores —
+    powers the pipeline-visualization UI.
+
+    Cancels itself if the browser navigates away mid-query, so a refresh doesn't leave
+    LLM calls running against a rate limit the next query needs.
+    """
+    try:
+        result = await _run_cancellable(
+            request, lambda: asdict(pipeline.query_trace(body.question, body.repo))
+        )
+    except UnexpectedResponse as exc:
+        # Trace cache and vector store can disagree — e.g. `docker compose down -v` on one
+        # volume but not the other. Say so instead of surfacing a raw Qdrant 404.
+        if exc.status_code != 404:
+            raise
+        raise HTTPException(
+            status_code=409,
+            detail=f"{body.repo!r} has a cached trace but no vectors in Qdrant. Re-ingest it.",
+        ) from exc
+    except Cancelled:
+        # 499 is nginx's "client closed request" — nothing is listening, but this keeps
+        # the log honest instead of reporting a 500 for a request we abandoned on purpose.
+        logger.info("Query cancelled by client disconnect: %r", body.question)
+        return Response(status_code=499)
+    return JSONResponse(result)

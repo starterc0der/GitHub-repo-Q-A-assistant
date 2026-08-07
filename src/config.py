@@ -11,8 +11,19 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     reranker_model: str = "BAAI/bge-reranker-base"
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1"
+
+    # Any OpenAI-compatible /chat/completions endpoint — see README for base URLs.
+    llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    llm_api_key: str = ""
+    llm_model: str = "gemini-flash-latest"
+    # Ingest runs one call per file *and* per chunk, so this one should be the cheapest
+    # model that can write a sentence.
+    llm_bulk_model: str = "gemini-flash-lite-latest"
+
+    # ~18s of weight loading; at startup rather than charged to the first question.
+    # Turn off in development so `--reload` doesn't pay it on every edit.
+    preload_models: bool = True
+
     repo_clone_dir: str = "./data/repos"
     # Cached ingest traces, keyed by repo name — lets a previously-ingested repo be
     # reselected in the UI without re-cloning/re-summarizing/re-embedding.
@@ -29,6 +40,9 @@ class Settings(BaseSettings):
     hybrid_bm25_weight: float = 0.25
     # Cross-encoder reranking: final number of chunks handed to compression/generation.
     rerank_top_k: int = 6
+    # If the best reranked chunk scores below this, nothing in the repo answers the
+    # question. Measured: off-topic tops out at 0.0, weakest real match was 0.35.
+    rerank_min_top_score: float = 0.01
 
 
 settings = Settings()

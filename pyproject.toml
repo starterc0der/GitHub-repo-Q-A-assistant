@@ -23,6 +23,11 @@ dev = ["pytest>=8.3", "ruff>=0.7"]
 [tool.ruff]
 line-length = 100
 
+[tool.pytest.ini_options]
+# data/repos holds cloned repos (gitignored scratch) — including, after ingesting this
+# project itself, a stale copy of this very test suite. Never collect from there.
+testpaths = ["tests"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

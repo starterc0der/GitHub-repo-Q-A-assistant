@@ -1,14 +1,45 @@
+# secrets
 .env
+
+# python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
 *.egg-info/
 build/
 dist/
+
+# tool caches
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.cache/
+.coverage
+htmlcov/
+
+# model weights pulled at runtime by sentence-transformers
+*.safetensors
+*.onnx
+
+# generated at runtime: cloned repos, saved ingest traces, vector store
 data/repos/
+data/ingest_cache/
 qdrant_storage/
+
+# logs
+*.log
+logs/
+
+# pasted screenshots
+Pasted*.png
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# local agent tooling
 claude
 .serena

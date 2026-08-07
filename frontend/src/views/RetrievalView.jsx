@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { RagChunkCard, RagEmbedding, RagScorePill, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
+import { RagChunkCard, RagCode, RagEmbedding, RagScorePill, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
 import {
   RagVectorSpace,
   pointsForCompress,
@@ -16,6 +16,7 @@ export const RETRIEVAL_STAGES = [
   { id: "rerank", title: "Cross-rerank" },
   { id: "compress", title: "Compress" },
   { id: "prompt", title: "Final prompt" },
+  { id: "answer", title: "LLM answer" },
 ];
 
 function retrievalStageMeta(data, id) {
@@ -27,14 +28,49 @@ function retrievalStageMeta(data, id) {
     case "hybrid":
       return `${data.candidates.length} candidates`;
     case "rerank":
-      return `${data.reranked.length} reranked`;
+      return data.reranked.length === 0 && data.candidates.length > 0
+        ? `0 of ${data.candidates.length} — no answer found`
+        : `${data.reranked.length} reranked`;
     case "compress":
-      return `${data.final_chunks.length} final chunks`;
+      return data.final_chunks.length === 0 ? "nothing to compress" : `${data.final_chunks.length} final chunks`;
     case "prompt":
       return `${data.final_prompt.length} chars`;
+    case "answer":
+      if (!data.answer) return null;
+      return data.answer.error ? "failed" : `${data.answer.citations.length} citations`;
     default:
       return null;
   }
+}
+
+// An empty stage is ambiguous — it reads as "the pipeline broke", not "the filter did its
+// job". Every stage that can legitimately end up with nothing says so explicitly instead.
+function RagEmptyStage({ title, children }) {
+  return (
+    <div className="rag-empty">
+      <span className="rag-empty__title">{title}</span>
+      <div className="rag-empty__body">{children}</div>
+    </div>
+  );
+}
+
+// Splits answer text on [file:Lstart-Lend] markers so each one renders as a pill inline.
+const CITATION_RE = /\[([^\]:]+):L(\d+)-L(\d+)\]/g;
+
+function AnswerText({ text }) {
+  const parts = [];
+  let last = 0;
+  for (const m of text.matchAll(CITATION_RE)) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    parts.push(
+      <span className="rag-cite" key={`${m.index}-${m[0]}`}>
+        {m[1]}:L{m[2]}-L{m[3]}
+      </span>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return <p className="rag-answer__text">{parts}</p>;
 }
 
 export function RetrievalStageList({ data, statuses, current, onSelect }) {
@@ -145,9 +181,30 @@ export function RetrievalSections({ data, visible }) {
             legend={[{ tone: "accent2", label: "reranked · size = score" }, { tone: "dim", label: "not selected" }]}
             caption="Cross-encoder reordering doesn't always match raw distance — joint attention can promote a chunk the embedding space placed further away."
           />
-          {data.reranked.map((r) => (
-            <RagChunkCard key={r.chunk.id} chunk={r.chunk} scores={[["rerank", r.rerank_score, "accent"]]} />
-          ))}
+          {data.reranked.length === 0 ? (
+            <RagEmptyStage title={`No answer found among ${data.candidates.length} candidates`}>
+              <p>
+                Even the best-scoring candidate fell below <strong>{data.rerank_min_top_score}</strong>,
+                so the whole list was rejected — nothing in this repo answers the question.
+              </p>
+              <p>
+                This is the only stage that can say "nothing here". The fused score above is
+                <em> relative</em> — min-max normalized within the candidate pool, so the best
+                candidate always scores near the top even when the whole pool is irrelevant.
+                The cross-encoder scores each pair on its own merits, so its number is absolute:
+                a 0.0 means genuinely unrelated, not merely "worst of these".
+              </p>
+              <p>
+                Only the <em>top</em> score is checked, not each chunk's. A chunk that supports
+                an answer without containing it scores low but is still worth sending — so once
+                the best chunk clears the gate, the whole top-k is kept.
+              </p>
+            </RagEmptyStage>
+          ) : (
+            data.reranked.map((r) => (
+              <RagChunkCard key={r.chunk.id} chunk={r.chunk} scores={[["rerank", r.rerank_score, "accent"]]} />
+            ))
+          )}
         </RagSection>
       )}
 
@@ -168,6 +225,14 @@ export function RetrievalSections({ data, visible }) {
             ]}
             caption="Only the kept chunks below continue on to the final prompt."
           />
+          {data.final_chunks.length === 0 && (
+            <RagEmptyStage title="Nothing reached compression">
+              <p>
+                Reranking kept no chunks, so there was nothing to trim. Compression only ever
+                narrows what it is given — it never adds chunks back.
+              </p>
+            </RagEmptyStage>
+          )}
           {data.final_chunks.map((f, i) => (
             <RagChunkCard
               key={f.chunk.id + i}
@@ -191,12 +256,14 @@ export function RetrievalSections({ data, visible }) {
           id="prompt"
           num="6"
           title="Final prompt"
-          description="Nothing gets sent to an LLM here — this is exactly the system prompt and user prompt that would be, verbatim."
-          plain="Assemble everything above into the exact instructions — system prompt, trimmed matches, and your question — that would be handed to an LLM to write the final answer. Shown here as-is; no LLM is actually called."
+          description="Exactly what gets sent to the answer model — system prompt and user prompt, verbatim."
+          plain="Assemble everything above into the exact instructions — system prompt, trimmed matches, and your question — that get handed to the LLM to write the final answer. This is the real payload, shown character for character."
         >
-          <div className="rag-callout">
-            <span className="rag-callout__label">system prompt</span>
-            <p>{data.system_prompt}</p>
+          {/* pre, not p: the system prompt is a numbered rule list and its line breaks
+              are meaningful — collapsing them makes it unreadable. */}
+          <p className="rag-hint">System prompt, verbatim:</p>
+          <div className="rag-prompt">
+            <pre>{data.system_prompt}</pre>
           </div>
           <div className="rag-stat-row">
             <div className="rag-stat rag-stat--accent">
@@ -208,10 +275,73 @@ export function RetrievalSections({ data, visible }) {
               <span className="rag-stat__l">characters</span>
             </div>
           </div>
+          {data.final_chunks.length === 0 && (
+            <RagEmptyStage title="No prompt was sent">
+              <p>
+                With no chunks to ground an answer, the pipeline short-circuits before the
+                generation call — see <code>Pipeline.NO_MATCH</code>. The empty prompt below is
+                what <em>would</em> have been built; it was never sent to the model.
+              </p>
+            </RagEmptyStage>
+          )}
           <p className="rag-hint">Full user prompt, verbatim:</p>
           <div className="rag-prompt">
             <pre>{data.final_prompt}</pre>
           </div>
+        </RagSection>
+      )}
+
+      {visible.answer && data.answer && (
+        <RagSection
+          id="answer"
+          num="7"
+          title="LLM answer"
+          description="The prompt above, sent to the answer model. Citations are parsed back to the chunks they came from — an uncited claim is ungrounded by construction."
+          plain="The AI reads the trimmed code and writes the answer, tagging each statement with the exact file and lines it came from — so you can check every claim against the source instead of trusting it."
+        >
+          {data.answer.error ? (
+            <p className="rag-error">{data.answer.error}</p>
+          ) : (
+            <Fragment>
+              <div className="rag-stat-row">
+                <div className="rag-stat rag-stat--accent">
+                  <span className="rag-stat__n">{data.answer.citations.length}</span>
+                  <span className="rag-stat__l">citations resolved</span>
+                </div>
+                <div className="rag-stat">
+                  <span className="rag-stat__n">{data.answer.confidence.toFixed(2)}</span>
+                  <span className="rag-stat__l">confidence</span>
+                </div>
+              </div>
+              <div className="rag-answer">
+                <span className="rag-callout__label">answer</span>
+                <AnswerText text={data.answer.text} />
+                <span className="rag-answer__model">{data.answer.model}</span>
+              </div>
+              {data.answer.citations.length === 0 ? (
+                <p className="rag-hint">
+                  No citation markers resolved to a retrieved chunk — either the model found no
+                  answer in the code, or it cited a location that was not in the prompt.
+                </p>
+              ) : (
+                <Fragment>
+                  <p className="rag-hint">Each citation, resolved back to its source lines:</p>
+                  {data.answer.citations.map((c, i) => (
+                    <div className="rag-chunk" key={`${c.file_path}-${c.start_line}-${i}`}>
+                      <div className="rag-chunk__head">
+                        <span className="rag-chunk__loc">
+                          {c.file_path}:L{c.start_line}-L{c.end_line}
+                        </span>
+                      </div>
+                      <div className="rag-chunk__body">
+                        <RagCode code={c.snippet} startLine={c.start_line} />
+                      </div>
+                    </div>
+                  ))}
+                </Fragment>
+              )}
+            </Fragment>
+          )}
         </RagSection>
       )}
     </Fragment>

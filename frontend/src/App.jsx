@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ingestTraceStream, listRepos, queryTrace } from "./api.js";
+import { cachedIngestTrace, ingestTraceStream, listRepos, queryTrace } from "./api.js";
 import { cls } from "./components/RagAtoms.jsx";
+import { RagErrorBoundary } from "./components/RagErrorBoundary.jsx";
 import { RagVectorModal } from "./components/RagVectorModal.jsx";
 import { useStageRunner } from "./hooks/useStageRunner.js";
 import { INGEST_STAGES, IngestSections, IngestStageList } from "./views/IngestView.jsx";
@@ -108,6 +109,31 @@ export default function App() {
     });
   }
 
+  // Replays a stored trace instead of ingesting. Same render path as a fresh ingest —
+  // the cached payload is byte-identical to what the stream would have delivered — so it
+  // also sets the retrieval repo, since selecting one here almost always means you're
+  // about to ask it something.
+  async function handleLoadIngest(name) {
+    if (!name || ingestBusy) return;
+    closeIngestStreamRef.current?.();
+    setIngestError(null);
+    setIngestProgress(null);
+    setIngestLoading(true);
+    try {
+      const data = await cachedIngestTrace(name);
+      setIngestData(data);
+      setRepo(data.repo);
+      setRepoUrl(data.repo_url || "");
+      setCurrentIngest(INGEST_IDS[0]);
+      contentRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+      ingestRunner.run((id) => setCurrentIngest(id));
+    } catch (err) {
+      setIngestError(err.message);
+    } finally {
+      setIngestLoading(false);
+    }
+  }
+
   async function handleRunRetrieval(e) {
     e.preventDefault();
     if (retrievalRunner.running || !repo.trim() || !question.trim()) return;
@@ -167,8 +193,9 @@ export default function App() {
           </p>
           <p>
             <strong>Retrieval</strong> (right tab) happens per question: it embeds the question, finds the closest
-            pieces from the index, double-checks them, trims them, and assembles the final prompt that would be sent
-            to an LLM — this tool stops there and shows you exactly what would be sent, without calling the LLM.
+            pieces from the index, double-checks them, trims them, assembles the final prompt, and sends it to the
+            LLM — showing you the exact prompt and the answer it produced, with every claim traced back to the lines
+            it came from.
           </p>
           <p>Click any step on the left to jump to it, or hit Run to watch the whole flow play out.</p>
         </div>
@@ -178,7 +205,24 @@ export default function App() {
         <aside className="rag-sidebar">
           {isIngest ? (
             <form className="rag-input-card" onSubmit={handleRunIngest}>
-              <label className="rag-input-card__label">Repository URL</label>
+              <label className="rag-input-card__label">Already ingested</label>
+              <select
+                className="rag-input rag-input--mono"
+                value={ingestData?.repo || ""}
+                onChange={(e) => handleLoadIngest(e.target.value)}
+                disabled={ingestBusy || repoOptions.length === 0}
+              >
+                <option value="" disabled>
+                  {repoOptions.length === 0 ? "Nothing ingested yet" : "Replay a stored ingest…"}
+                </option>
+                {repoOptions.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+
+              <label className="rag-input-card__label">Or ingest a new repository</label>
               <input
                 className="rag-input"
                 placeholder="https://github.com/owner/repo"
@@ -257,9 +301,11 @@ export default function App() {
         </aside>
 
         <main className="rag-content" ref={contentRef}>
-          {isIngest
-            ? ingestData && <IngestSections data={ingestData} visible={ingestRunner.visible} />
-            : retrievalData && <RetrievalSections data={retrievalData} visible={retrievalRunner.visible} />}
+          <RagErrorBoundary key={isIngest ? "ingest" : "retrieval"} label={isIngest ? "Ingestion" : "Retrieval"}>
+            {isIngest
+              ? ingestData && <IngestSections data={ingestData} visible={ingestRunner.visible} />
+              : retrievalData && <RetrievalSections data={retrievalData} visible={retrievalRunner.visible} />}
+          </RagErrorBoundary>
         </main>
       </div>
 

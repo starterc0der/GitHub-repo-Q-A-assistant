@@ -231,22 +231,25 @@
   position: fixed; inset: 0; z-index: 100; background: var(--bg);
   display: flex; flex-direction: column; animation: ragFadeIn 0.25s ease both;
 }
-.rag-modal__head { display: flex; align-items: flex-start; justify-content: space-between; padding: 20px 28px 8px; flex-shrink: 0; }
+.rag-modal__head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; padding: 16px 32px 6px; flex-shrink: 0; max-width: 1600px; margin: 0 auto; width: 100%; }
 .rag-modal__eyebrow { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent-ink); }
-.rag-modal__head h2 { font-size: 22px; margin: 4px 0 0; }
+.rag-modal__head h2 { font-size: 20px; margin: 2px 0 0; font-weight: 600; }
 .rag-modal__close {
   width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--panel);
   font-size: 20px; line-height: 1; color: var(--ink-dim);
 }
 .rag-modal__close:hover { background: var(--accent-soft); color: var(--accent-ink); }
-.rag-modal__stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 0 28px; }
-.rag-modal__svg { width: 100%; height: 100%; max-width: 1200px; }
+.rag-modal__stage {
+  flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+  padding: 0 32px; position: relative;
+}
+.rag-modal__svg { width: 100%; height: 100%; max-width: 1600px; }
 .rag-modal__svg circle, .rag-modal__svg line {
   transition: cx .6s cubic-bezier(.3,.7,.3,1), cy .6s cubic-bezier(.3,.7,.3,1), r .5s ease, opacity .5s ease,
     fill .5s ease, stroke .5s ease, stroke-width .5s ease;
 }
-.rag-modal__foot { flex-shrink: 0; padding: 10px 28px 26px; max-width: 900px; margin: 0 auto; width: 100%; }
-.rag-modal__caption { text-align: center; font-size: 14.5px; color: var(--ink-dim); margin: 0 0 16px; line-height: 1.5; min-height: 42px; }
+.rag-modal__foot { flex-shrink: 0; padding: 8px 32px 22px; max-width: 820px; margin: 0 auto; width: 100%; }
+.rag-modal__caption { text-align: center; font-size: 14px; color: var(--ink-dim); margin: 0 0 14px; line-height: 1.55; min-height: 44px; }
 .rag-modal__controls { display: flex; align-items: center; justify-content: center; gap: 14px; }
 .rag-btn--ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--border-strong); }
 .rag-btn--ghost:hover:not(:disabled) { background: var(--panel-2); }
@@ -278,3 +281,74 @@
 .rag-vline-in { stroke-dasharray: 140; stroke-dashoffset: 140; animation: ragLineIn 0.7s ease-out both; }
 @keyframes ragLineIn { to { stroke-dashoffset: 0; } }
 @media (prefers-reduced-motion: reduce) { .rag-vpoint-in, .rag-vline-in { animation: none !important; } }
+
+/* answer stage — the one section that shows real model output, so it reads as a
+   deliverable rather than another inspector panel */
+.rag-answer {
+  background: var(--accent2-soft); border: 1px solid var(--accent2-border);
+  border-radius: 10px; padding: 16px 18px; margin: 8px 0 18px; position: relative;
+}
+.rag-answer__text {
+  margin: 8px 0 0; font-size: 14px; line-height: 1.65; color: var(--ink);
+  white-space: pre-wrap;
+}
+.rag-answer__model {
+  display: block; margin-top: 12px; font-family: var(--mono); font-size: 11px;
+  color: var(--ink-faint);
+}
+/* inline citation pill — makes grounded vs ungrounded sentences scannable at a glance */
+.rag-cite {
+  display: inline-block; font-family: var(--mono); font-size: 11.5px;
+  background: var(--panel); border: 1px solid var(--accent-border); border-radius: 5px;
+  padding: 0 5px; margin: 0 2px; color: var(--accent-ink); white-space: nowrap;
+  vertical-align: baseline;
+}
+
+/* expand/collapse for long file lists in the ingest view */
+.rag-more-btn {
+  display: block; width: 100%; margin: 10px 0 4px; padding: 9px 12px;
+  border: 1px dashed var(--border); border-radius: 8px; background: transparent;
+  color: var(--accent-ink); font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.rag-more-btn:hover { background: var(--accent-soft); border-style: solid; }
+
+/* 3D vector space — the plot is draggable, so signal it and stop text selection
+   fighting the orbit gesture mid-drag */
+.rag-vspace__svg--3d { cursor: grab; touch-action: none; user-select: none; }
+.rag-vspace__svg--3d:active { cursor: grabbing; }
+.rag-vspace__hint { color: var(--ink-faint); font-style: italic; }
+
+/* error boundary — a failed stage should read as a diagnosis, not a blank page */
+.rag-boundary {
+  border: 1px solid var(--warn); border-radius: 10px; padding: 18px 20px; margin: 12px 0;
+  background: color-mix(in oklab, var(--warn) 7%, transparent);
+}
+.rag-boundary__title { margin: 0 0 8px; font-weight: 600; color: var(--warn); }
+.rag-boundary__msg {
+  margin: 0 0 10px; padding: 10px 12px; border-radius: 8px; background: var(--code-bg);
+  font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+}
+.rag-boundary__hint { margin: 0 0 12px; font-size: 12.5px; color: var(--ink-dim); }
+
+/* drag affordance, parked in the stage's bottom-right so it never crowds the plot */
+.rag-modal__hint {
+  position: absolute; right: 36px; bottom: 8px;
+  font-size: 11.5px; color: var(--ink-faint); font-style: italic;
+  pointer-events: none; user-select: none;
+}
+
+/* empty-stage note — a filtered-to-nothing stage should read as a result, not a failure */
+.rag-empty {
+  border: 1px dashed var(--accent2-border); border-radius: 10px; padding: 16px 18px;
+  background: var(--accent2-soft); margin: 8px 0 4px;
+}
+.rag-empty__title {
+  display: block; font-size: 11.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--accent-ink); margin-bottom: 8px;
+}
+.rag-empty__body p { margin: 0 0 8px; font-size: 13.5px; line-height: 1.6; color: var(--ink-dim); }
+.rag-empty__body p:last-child { margin-bottom: 0; }
+.rag-empty__body code {
+  font-family: var(--mono); font-size: 12.5px; background: var(--code-bg);
+  padding: 1px 5px; border-radius: 4px;
+}

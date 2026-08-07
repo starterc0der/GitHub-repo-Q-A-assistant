@@ -1,5 +1,5 @@
 // Fullscreen "whole vector space" walkthrough: one persistent scatter of every chunk in
-// the repo (src/trace.py's whole_chunk_xy — a PCA space separate from the per-stage plots
+// the repo (src/trace.py's whole_chunk_xyz — a PCA space separate from the per-stage plots
 // in RagVectorSpace, since it covers the full repo rather than just the routed-file pool)
 // that re-tints/re-sizes/re-connects via CSS transitions as you step through the stages.
 //
@@ -8,7 +8,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { cls } from "./RagAtoms.jsx";
-import { TONE_COLOR, chunkLabelFromId, normalizePoints } from "./RagVectorSpace.jsx";
+import { CubeFrame, TONE_COLOR, chunkLabelFromId, normalizePoints, useOrbit } from "./RagVectorSpace.jsx";
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 const MODAL_STEPS = [
   {
@@ -59,23 +61,27 @@ function buildContext(data) {
   return { routedMap, candMap, rerankMap, maxRerank, kept, dropped };
 }
 
+// Radii are in viewBox units, and the modal renders that 100-unit box across ~1600px —
+// so 1 unit is ~16px. The old base of 1.5 drew 45px circles that merged into a blob at
+// 179 points; these keep the same *relative* sizing (which encodes score) at a third the
+// area, so the cloud reads as individual chunks again.
 function pointState(step, point, ctx) {
   const routed = ctx.routedMap.has(point.filePath);
   const isCand = ctx.candMap.has(point.id);
   const isTop = ctx.rerankMap.has(point.id);
-  const base = 1.5;
+  const base = 0.62;
 
   if (step <= 1) return { tone: "neutral", r: base, line: false, weight: 0 };
 
   if (step === 2) {
     return routed
-      ? { tone: "accent2", r: base + 0.7, line: true, weight: ctx.routedMap.get(point.filePath) }
-      : { tone: "dim", r: base * 0.8, line: false, weight: 0 };
+      ? { tone: "accent2", r: base + 0.3, line: true, weight: ctx.routedMap.get(point.filePath) }
+      : { tone: "dim", r: base * 0.78, line: false, weight: 0 };
   }
 
   if (step === 3) {
     if (isCand) {
-      return { tone: "accent", r: base + 0.7, line: true, weight: ctx.candMap.get(point.id) };
+      return { tone: "accent", r: base + 0.3, line: true, weight: ctx.candMap.get(point.id) };
     }
     return routed
       ? { tone: "neutral", r: base, line: false, weight: 0 }
@@ -85,7 +91,7 @@ function pointState(step, point, ctx) {
   if (step === 4) {
     if (isTop) {
       const norm = ctx.rerankMap.get(point.id) / (ctx.maxRerank || 1);
-      return { tone: "accent2", r: base + 0.4 + norm * 1.3, line: true, weight: Math.max(0.25, norm) };
+      return { tone: "accent2", r: base + 0.18 + norm * 0.55, line: true, weight: Math.max(0.25, norm) };
     }
     return isCand
       ? { tone: "neutral", r: base, line: false, weight: 0 }
@@ -93,27 +99,36 @@ function pointState(step, point, ctx) {
   }
 
   // step 5: compression — the last step
-  if (ctx.kept.has(point.id)) return { tone: "accent2", r: base + 1, line: true, weight: 0.85 };
-  if (ctx.dropped.has(point.id)) return { tone: "warn", r: base + 0.3, line: false, weight: 0 };
+  if (ctx.kept.has(point.id)) return { tone: "accent2", r: base + 0.42, line: true, weight: 0.85 };
+  if (ctx.dropped.has(point.id)) return { tone: "warn", r: base + 0.13, line: false, weight: 0 };
   return { tone: "dim", r: base * 0.7, line: false, weight: 0 };
 }
 
 export function RagVectorModal({ data, onClose }) {
   const { points, query } = useMemo(() => {
-    const raw = Object.entries(data.whole_chunk_xy).map(([id, xy]) => ({
+    const raw = Object.entries(data.whole_chunk_xyz).map(([id, xyz]) => ({
       id,
-      x: xy[0],
-      y: xy[1],
+      x: xyz?.[0] ?? 0,
+      y: xyz?.[1] ?? 0,
+      z: xyz?.[2] ?? 0,
       filePath: chunkLabelFromId(id),
       label: data.chunk_labels[id] || chunkLabelFromId(id),
     }));
-    return normalizePoints(raw, data.query_whole_chunk_xy);
+    return normalizePoints(raw, data.query_whole_chunk_xyz);
   }, [data]);
 
   const ctx = useMemo(() => buildContext(data), [data]);
 
+  const { project, cube, handlers } = useOrbit();
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
+
+  // Project + depth-sort once per render: state depends on `step`, so this can't be
+  // memoized on `points` alone. Painter's algorithm — furthest drawn first.
+  const projected = points
+    .map((p) => ({ p: { ...p, proj: project(p.x, p.y, p.z) }, s: pointState(step, p, ctx) }))
+    .sort((a, b) => b.p.proj.depth - a.p.proj.depth);
+  const q = project(query[0], query[1], query[2]);
 
   useEffect(() => {
     function onKey(e) {
@@ -152,55 +167,60 @@ export function RagVectorModal({ data, onClose }) {
       </div>
 
       <div className="rag-modal__stage">
-        <svg className="rag-modal__svg" viewBox="0 0 100 60" preserveAspectRatio="xMidYMid meet">
+        <svg
+          className="rag-modal__svg rag-vspace__svg--3d"
+          viewBox="0 0 100 60"
+          preserveAspectRatio="xMidYMid meet"
+          {...handlers}
+        >
+          <CubeFrame cube={cube} />
           {showQuery &&
-            points
-              .map((p) => ({ p, s: pointState(step, p, ctx) }))
+            projected
               .filter(({ s }) => s.line)
               .map(({ p, s }) => (
                 <line
                   key={"l-" + p.id}
-                  x1={query[0]}
-                  y1={query[1]}
-                  x2={p.x}
-                  y2={p.y}
+                  x1={q.x}
+                  y1={q.y}
+                  x2={p.proj.x}
+                  y2={p.proj.y}
                   stroke={TONE_COLOR[s.tone]}
-                  strokeWidth={0.2 + s.weight * 0.5}
-                  opacity={0.2 + s.weight * 0.55}
+                  strokeWidth={(0.2 + s.weight * 0.5) * p.proj.k}
+                  opacity={(0.2 + s.weight * 0.55) * clamp(p.proj.k, 0.45, 1.15)}
                 />
               ))}
-          {points.map((p) => {
-            const s = pointState(step, p, ctx);
-            return (
-              <circle
-                key={p.id}
-                cx={p.x}
-                cy={p.y}
-                r={s.r}
-                fill={TONE_COLOR[s.tone]}
-                opacity={s.tone === "dim" ? 0.35 : 0.92}
-              >
-                <title>{p.label}</title>
-              </circle>
-            );
-          })}
+          {projected.map(({ p, s }) => (
+            <circle
+              key={p.id}
+              cx={p.proj.x}
+              cy={p.proj.y}
+              r={s.r * clamp(p.proj.k, 0.45, 1.55)}
+              fill={TONE_COLOR[s.tone]}
+              stroke="var(--panel)"
+              strokeWidth={0.09}
+              opacity={(s.tone === "dim" ? 0.3 : 0.85) * clamp(p.proj.k * 0.85, 0.32, 1)}
+            >
+              <title>{p.label}</title>
+            </circle>
+          ))}
           {showQuery && (
             <g className="rag-vquery">
-              <circle cx={query[0]} cy={query[1]} r="4.2" className="rag-vquery__ring" />
+              <circle cx={q.x} cy={q.y} r={4.2 * clamp(q.k, 0.6, 1.4)} className="rag-vquery__ring" />
               <rect
-                x={query[0] - 1.7}
-                y={query[1] - 1.7}
+                x={q.x - 1.7}
+                y={q.y - 1.7}
                 width="3.4"
                 height="3.4"
-                transform={`rotate(45 ${query[0]} ${query[1]})`}
+                transform={`rotate(45 ${q.x} ${q.y})`}
                 fill="var(--accent)"
               />
-              <text x={query[0]} y={query[1] + 8} textAnchor="middle" className="rag-vspace__querylabel">
+              <text x={q.x} y={q.y + 8} textAnchor="middle" className="rag-vspace__querylabel">
                 your question
               </text>
             </g>
           )}
         </svg>
+        <span className="rag-modal__hint">drag to rotate · ← → to step · Esc to close</span>
       </div>
 
       <div className="rag-modal__foot">
