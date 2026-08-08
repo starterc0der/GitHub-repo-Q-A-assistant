@@ -25,17 +25,20 @@ class Settings(BaseSettings):
     preload_models: bool = True
 
     repo_clone_dir: str = "./data/repos"
-    # Cached ingest traces, keyed by repo name — lets a previously-ingested repo be
-    # reselected in the UI without re-cloning/re-summarizing/re-embedding.
-    ingest_cache_dir: str = "./data/ingest_cache"
+    upload_dir: str = "./data/uploads"
+    db_path: str = "./data/app.db"
     chunk_max_chars: int = 2000
     chunk_overlap: int = 200
+    # How many prior turns (user+assistant pairs) are sent to the LLM as chat history.
+    history_turns: int = 3
 
     # Hierarchical routing: how many files the router shortlists per question.
     top_files: int = 8
     # Hybrid retrieval: candidate pool size before reranking, and BM25:dense fusion weight
     # (4:1 dense:bm25 mirrors Anthropic's contextual-retrieval cookbook finding).
-    hybrid_candidate_k: int = 40
+    # Reranking costs ~1s/candidate on CPU; the final top_k has consistently come from
+    # fused positions <=16, so reranking all 40 was ~25s of pure waste per query.
+    hybrid_candidate_k: int = 12
     hybrid_dense_weight: float = 1.0
     hybrid_bm25_weight: float = 0.25
     # Cross-encoder reranking: final number of chunks handed to compression/generation.
@@ -43,6 +46,12 @@ class Settings(BaseSettings):
     # If the best reranked chunk scores below this, nothing in the repo answers the
     # question. Measured: off-topic tops out at 0.0, weakest real match was 0.35.
     rerank_min_top_score: float = 0.01
+    # Whole-document fallback (e.g. "summarize the story"): no single chunk answers such a
+    # question, so the rerank gate above always rejects it. When that happens, the routed
+    # file(s) are sent whole instead of chunk-by-chunk — but only up to this token budget,
+    # kept well under typical per-minute token quotas rather than the model's raw context
+    # window, which is usually the looser constraint on a free tier.
+    wide_answer_max_tokens: int = 150_000
 
 
 settings = Settings()

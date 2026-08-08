@@ -22,7 +22,8 @@ services:
       # Container-network address — overrides whatever .env has for Qdrant.
       QDRANT_URL: http://qdrant:6333
       REPO_CLONE_DIR: /app/data/repos
-      INGEST_CACHE_DIR: /app/data/ingest_cache
+      UPLOAD_DIR: /app/data/uploads
+      DB_PATH: /app/data/db/app.db
       # Interpolated from .env (compose reads it automatically) or the shell.
       LLM_BASE_URL: ${LLM_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env — see Configuration in the README}
@@ -30,10 +31,11 @@ services:
       LLM_BULK_MODEL: ${LLM_BULK_MODEL:-gemini-flash-lite-latest}
       PRELOAD_MODELS: ${PRELOAD_MODELS:-true}
     volumes:
-      # Named volumes, not host bind-mounts: cloned repos, cached ingest traces, and
-      # downloaded models are scratch owned by the container's root user.
+      # Named volumes, not host bind-mounts: cloned repos, uploaded files, the sqlite
+      # db, and downloaded models are scratch/state owned by the container's root user.
       - repo_data:/app/data/repos
-      - ingest_cache:/app/data/ingest_cache
+      - uploads:/app/data/uploads
+      - app_db:/app/data/db
       - hf_cache:/root/.cache/huggingface # avoids re-downloading embedding/reranker models
     depends_on:
       qdrant:
@@ -49,5 +51,6 @@ services:
 volumes:
   hf_cache:
   repo_data:
-  ingest_cache:
+  uploads:
+  app_db:
   qdrant_storage:

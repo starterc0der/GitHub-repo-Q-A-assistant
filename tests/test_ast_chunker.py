@@ -17,7 +17,7 @@ def test_chunk_file_splits_on_definitions_with_exact_line_ranges() -> None:
     chunker = _chunker()
     original_lines = FIXTURE.read_text().splitlines()
 
-    chunks = chunker.chunk_file(FIXTURE, FIXTURE.parent, repo="fixtures", language="python")
+    chunks = chunker.chunk_file(FIXTURE, FIXTURE.parent, space_id="s", source_id="fixtures", language="python")
 
     assert [c.symbol_name for c in chunks] == [None, "add", "subtract", "Calculator"]
     for chunk in chunks:
@@ -30,7 +30,7 @@ def test_decorated_function_unwraps_to_inner_definition_name(tmp_path: Path) -> 
     path.write_text('@staticmethod\ndef greet():\n    return "hi"\n')
     chunker = _chunker()
 
-    chunks = chunker.chunk_file(path, tmp_path, repo="demo", language="python")
+    chunks = chunker.chunk_file(path, tmp_path, space_id="s", source_id="demo", language="python")
 
     assert len(chunks) == 1
     assert chunks[0].symbol_name == "greet"
@@ -40,7 +40,7 @@ def test_decorated_function_unwraps_to_inner_definition_name(tmp_path: Path) -> 
 def test_unsupported_language_falls_back_to_recursive_chunker() -> None:
     chunker = _chunker()
 
-    chunks = chunker.chunk_file(FIXTURE, FIXTURE.parent, repo="fixtures", language="text")
+    chunks = chunker.chunk_file(FIXTURE, FIXTURE.parent, space_id="s", source_id="fixtures", language="text")
 
     assert chunks
     assert all(c.symbol_name is None for c in chunks)
@@ -51,4 +51,4 @@ def test_empty_file_returns_no_chunks(tmp_path: Path) -> None:
     path.write_text("")
     chunker = _chunker()
 
-    assert chunker.chunk_file(path, tmp_path, repo="demo", language="python") == []
+    assert chunker.chunk_file(path, tmp_path, space_id="s", source_id="demo", language="python") == []

@@ -19,11 +19,12 @@ def test_summarize_file_uses_llm_response() -> None:
     summarizer = Summarizer(FakeLLM(response=" Parses CLI args. "))
 
     result = summarizer.summarize_file(
-        "demo", "cli.py", "python", "def main(): ...", ["main"], "A CLI tool"
+        "demo", "src1", "cli.py", "python", "def main(): ...", ["main"], "A CLI tool"
     )
 
     assert result == FileSummary(
-        repo="demo",
+        space_id="demo",
+        source_id="src1",
         file_path="cli.py",
         language="python",
         summary="Parses CLI args.",
@@ -35,7 +36,7 @@ def test_summarize_file_falls_back_to_template_on_llm_failure() -> None:
     summarizer = Summarizer(FakeLLM(fail=True))
 
     result = summarizer.summarize_file(
-        "demo", "cli.py", "python", "def main(): ...", ["main"], "A CLI tool"
+        "demo", "src1", "cli.py", "python", "def main(): ...", ["main"], "A CLI tool"
     )
 
     assert result.summary == "cli.py: main."
@@ -47,3 +48,12 @@ def test_summarize_repo_falls_back_to_file_tree_on_llm_failure() -> None:
     result = summarizer.summarize_repo(readme="", file_tree="a.py\nb.py")
 
     assert result == "Repository with files:\na.py\nb.py"
+
+
+def test_template_summary_skips_the_llm_and_truncates() -> None:
+    summarizer = Summarizer(FakeLLM(fail=True))
+
+    result = summarizer.template_summary("demo", "src1", "notes.txt", "text", "x" * 600)
+
+    assert len(result.summary) == 500
+    assert result.symbols == []

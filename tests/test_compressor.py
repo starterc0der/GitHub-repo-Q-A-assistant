@@ -18,7 +18,8 @@ class FakeLLM:
 def _chunk(file_path: str = "a.py", start: int = 10) -> CodeChunk:
     return CodeChunk(
         id=f"{file_path}::10-13",
-        repo="demo",
+        space_id="demo",
+        source_id="src1",
         file_path=file_path,
         language="python",
         symbol_name="run",

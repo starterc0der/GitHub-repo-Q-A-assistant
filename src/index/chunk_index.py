@@ -19,11 +19,13 @@ class ChunkIndex:
 
     def ensure(self, dim: int) -> None:
         self.store.ensure_collection(COLLECTION_NAME, dim)
+        self.store.ensure_payload_index(COLLECTION_NAME, "space_id")
+        self.store.ensure_payload_index(COLLECTION_NAME, "source_id")
 
     def upsert(self, chunks: list[CodeChunk], vectors: list[list[float]]) -> None:
         points = [
             qmodels.PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{chunk.repo}::{chunk.id}")),
+                id=self._point_id(chunk),
                 vector=vector,
                 payload=self._to_payload(chunk),
             )
@@ -31,20 +33,28 @@ class ChunkIndex:
         ]
         self.store.upsert(COLLECTION_NAME, points)
 
+    def delete_source(self, space_id: str, source_id: str) -> None:
+        """Delete every chunk for one source — called before re-ingest and on source
+        removal, so stale chunks for files no longer upstream never linger."""
+        self.store.delete(COLLECTION_NAME, self._filter(space_id, source_id=source_id))
+
+    def delete_space(self, space_id: str) -> None:
+        self.store.delete(COLLECTION_NAME, self._filter(space_id))
+
     def search(
         self,
         vector: list[float],
         limit: int,
-        repo: str,
+        space_id: str,
         file_paths: list[str] | None = None,
     ) -> list[CodeChunk]:
         results = self.store.search(
-            COLLECTION_NAME, vector, limit, query_filter=self._filter(repo, file_paths)
+            COLLECTION_NAME, vector, limit, query_filter=self._filter(space_id, file_paths)
         )
         return [self._to_chunk(point) for point in results]
 
     def fetch_by_files(
-        self, repo: str, file_paths: list[str]
+        self, space_id: str, file_paths: list[str]
     ) -> list[tuple[CodeChunk, list[float]]]:
         """All chunks (with their stored vectors) for a set of already-routed files.
 
@@ -53,14 +63,34 @@ class ChunkIndex:
         """
         records = self.store.scroll(
             COLLECTION_NAME,
-            query_filter=self._filter(repo, file_paths),
+            query_filter=self._filter(space_id, file_paths),
             limit=10_000,
             with_vectors=True,
         )
         return [(self._to_chunk(record), record.vector) for record in records]
 
-    def _filter(self, repo: str, file_paths: list[str] | None) -> Filter:
-        must = [qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo))]
+    def fetch_by_ids(self, chunk_ids: list[str]) -> list[CodeChunk]:
+        """Rehydrate chunk bodies by their stable point id — used to redisplay a stored
+        trace without re-embedding or re-storing the chunk body per message."""
+        if not chunk_ids:
+            return []
+        records = self.store.retrieve(COLLECTION_NAME, chunk_ids)
+        return [self._to_chunk(record) for record in records]
+
+    def point_id(self, space_id: str, source_id: str, chunk_id: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{space_id}::{source_id}::{chunk_id}"))
+
+    def _point_id(self, chunk: CodeChunk) -> str:
+        return self.point_id(chunk.space_id, chunk.source_id, chunk.id)
+
+    def _filter(
+        self, space_id: str, file_paths: list[str] | None = None, source_id: str | None = None
+    ) -> Filter:
+        must = [qmodels.FieldCondition(key="space_id", match=qmodels.MatchValue(value=space_id))]
+        if source_id:
+            must.append(
+                qmodels.FieldCondition(key="source_id", match=qmodels.MatchValue(value=source_id))
+            )
         if file_paths:
             must.append(
                 qmodels.FieldCondition(key="file_path", match=qmodels.MatchAny(any=file_paths))
@@ -70,7 +100,8 @@ class ChunkIndex:
     def _to_payload(self, chunk: CodeChunk) -> dict[str, object]:
         return {
             "chunk_id": chunk.id,
-            "repo": chunk.repo,
+            "space_id": chunk.space_id,
+            "source_id": chunk.source_id,
             "file_path": chunk.file_path,
             "language": chunk.language,
             "symbol_name": chunk.symbol_name,
@@ -84,7 +115,8 @@ class ChunkIndex:
         payload = point.payload
         return CodeChunk(
             id=payload["chunk_id"],
-            repo=payload["repo"],
+            space_id=payload["space_id"],
+            source_id=payload["source_id"],
             file_path=payload["file_path"],
             language=payload["language"],
             symbol_name=payload["symbol_name"],

@@ -6,47 +6,33 @@ from dataclasses import dataclass, field
 from src.index.schema import CodeChunk
 from src.llm_client import LLMClient
 
-CITATION_PATTERN = re.compile(r"\[([^\]:]+):L(\d+)-L(\d+)\]")
+# Normally one range per bracket ([path:L1-L5]), but models sometimes group several
+# ranges for the same file into one bracket ([path:L1-L5, L9-L12]) despite the prompt
+# asking for one marker per claim — RANGE_PATTERN pulls out every range so grouped
+# citations still resolve instead of silently failing to match at all.
+CITATION_PATTERN = re.compile(r"\[([^\]:]+):(L\d+-L\d+(?:\s*,\s*L\d+-L\d+)*)\]")
+RANGE_PATTERN = re.compile(r"L(\d+)-L(\d+)")
 
 SYSTEM_PROMPT = (
-    "You answer questions about one specific repository, using ONLY the code chunks given "
-    "in the user message. Those chunks are your entire world: you cannot see the rest of "
-    "the repository, and you must not use anything you know about similarly-named projects, "
-    "libraries, or conventions.\n"
+    "Answer only from the code chunks in the user message — that is your entire world; "
+    "never use outside knowledge of similar projects, libraries, or conventions.\n"
     "\n"
-    "Grounding rules:\n"
-    "1. Every factual claim must be traceable to a specific line in a specific chunk. If you "
-    "cannot point at the line, do not write the sentence.\n"
-    "2. Cite each claim inline with a marker in the exact form [file_path:Lstart-Lend], using "
-    "a file path and line range that appear verbatim in the chunk headers above. Never invent, "
-    "adjust, or round a path or line number.\n"
-    "3. If the chunks do not answer the question, say so plainly and stop. Do not pad the reply "
-    "with whatever unrelated code you happened to be given. Two cases, and they need different "
-    "answers:\n"
-    "   (a) The question is about this repository, but the retrieved code does not cover it — say "
-    "the retrieved code does not contain the answer, and name what you would need to see "
-    "(which file, which function).\n"
-    "   (b) The question is not about this repository at all — general knowledge, current events, "
-    "trivia, or a different codebase — say that the question does not appear to relate to this "
-    "repository, and do not answer it from your own knowledge even if you know the answer.\n"
-    "   If no code chunks are provided at all, treat it as one of these two and answer "
-    "accordingly. In every case a short refusal is a correct and valuable answer; a plausible "
-    "guess is a failure.\n"
-    "4. If the chunks answer the question only partially, answer the part they cover, then say "
-    "explicitly which part is unsupported.\n"
-    "5. The chunks are excerpts, often trimmed to the lines matching the question. Code absent "
-    "from them is unknown, NOT absent from the repository. Never conclude that something "
-    "'is not implemented', 'is missing', or 'does not exist' from its absence here.\n"
-    "6. Do not describe behavior you have not read. Do not infer what a function does from its "
-    "name, guess at a parameter's meaning, or assume standard behavior for a library call. "
-    "Describe what the code visibly does.\n"
-    "7. Keep names exact — functions, classes, variables, files, and constants must match the "
-    "code character for character.\n"
-    "8. When you are reasoning beyond what is written rather than reporting it, mark that "
-    "sentence as inference in plain words. Never blend inference into a cited claim.\n"
+    "Rules:\n"
+    "1. Every claim must cite its source: [file_path:Lstart-Lend], exact and verbatim from "
+    "the chunk headers — one marker per claim, never invent or round a path/line. If you "
+    "cannot cite a line, do not write the claim.\n"
+    "2. If the chunks do not answer the question, say so and stop — do not pad with unrelated "
+    "code. Distinguish: (a) about this repo but not covered here — name the file/function you "
+    "would need; (b) not about this repo at all — say so, never answer from general knowledge. "
+    "Same if no chunks were given at all. A refusal is a correct answer; a guess is a failure.\n"
+    "3. Partial coverage gets a partial answer, with what is unsupported stated explicitly.\n"
+    "4. Chunks are excerpts — absence here means unknown, not absent from the repo. Never say "
+    "something is missing or does not exist just because it is not in front of you.\n"
+    "5. Describe only what the code visibly does — never infer behavior from a name or assumed "
+    "convention. Mark any inference explicitly; never blend it into a cited claim.\n"
+    "6. Match names — functions, files, identifiers — character for character.\n"
     "\n"
-    "Be concise and concrete. Quote or reference real identifiers rather than paraphrasing "
-    "vaguely. No preamble."
+    "Be concise and concrete, no preamble."
 )
 
 
@@ -70,19 +56,20 @@ class CitationParser:
 
     def parse(self, text: str, chunks: list[CodeChunk]) -> list[Citation]:
         citations = []
-        for file_path, start_str, end_str in CITATION_PATTERN.findall(text):
-            start_line, end_line = int(start_str), int(end_str)
-            chunk = self._find_chunk(file_path, start_line, chunks)
-            if chunk is None:
-                continue
-            citations.append(
-                Citation(
-                    file_path=file_path,
-                    start_line=start_line,
-                    end_line=end_line,
-                    snippet=self._extract_snippet(chunk, start_line, end_line),
+        for file_path, ranges in CITATION_PATTERN.findall(text):
+            for start_str, end_str in RANGE_PATTERN.findall(ranges):
+                start_line, end_line = int(start_str), int(end_str)
+                chunk = self._find_chunk(file_path, start_line, chunks)
+                if chunk is None:
+                    continue
+                citations.append(
+                    Citation(
+                        file_path=file_path,
+                        start_line=start_line,
+                        end_line=end_line,
+                        snippet=self._extract_snippet(chunk, start_line, end_line),
+                    )
                 )
-            )
         return citations
 
     def _find_chunk(
@@ -107,9 +94,11 @@ class AnswerGenerator:
         self.llm = llm
         self.citation_parser = citation_parser
 
-    def answer(self, question: str, chunks: list[CodeChunk]) -> Answer:
+    def answer(
+        self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None
+    ) -> Answer:
         prompt = self.build_prompt(question, chunks)
-        text = self.llm.complete(prompt, system=SYSTEM_PROMPT)
+        text = self.llm.complete(prompt, system=SYSTEM_PROMPT, history=history)
         citations = self.citation_parser.parse(text, chunks)
         confidence = 1.0 if citations else 0.3
         return Answer(text=text, citations=citations, confidence=confidence)

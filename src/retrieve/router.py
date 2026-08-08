@@ -11,14 +11,14 @@ class Router:
         self.embedder = embedder
         self.doc_index = doc_index
 
-    def route_to_files(self, question: str, repo: str, top_files: int) -> list[str]:
+    def route_to_files(self, question: str, space_id: str, top_files: int) -> list[str]:
         vector = self.embedder.embed_one(question)
-        summaries = self.doc_index.search(vector, top_files, repo)
+        summaries = self.doc_index.search(vector, top_files, space_id)
         return [s.file_path for s in summaries]
 
     def route_to_files_scored(
-        self, question: str, repo: str, top_files: int
+        self, question: str, space_id: str, top_files: int
     ) -> list[tuple[str, float]]:
         vector = self.embedder.embed_one(question)
-        scored = self.doc_index.search_scored(vector, top_files, repo)
+        scored = self.doc_index.search_scored(vector, top_files, space_id)
         return [(s.file_path, score) for s, score in scored]

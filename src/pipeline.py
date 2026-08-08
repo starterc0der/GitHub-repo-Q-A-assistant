@@ -8,7 +8,8 @@ from pathlib import Path
 
 from src.cancellation import Cancelled, check
 from src.config import Settings
-from src.generate.answer import SYSTEM_PROMPT, Answer, AnswerGenerator, CitationParser
+from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator, CitationParser
+from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
 from src.index.doc_index import DocIndex
 from src.index.embedder import Embedder
@@ -18,6 +19,7 @@ from src.ingest.ast_chunker import ASTChunker
 from src.ingest.chunker import LANGUAGE_BY_EXT, RecursiveChunker, Tokenizer
 from src.ingest.contextualizer import Contextualizer
 from src.ingest.repo_loader import RepoLoader
+from src.ingest.sources import load_docx, load_pdf, load_text
 from src.ingest.summarizer import Summarizer
 from src.llm_client import LLMClient
 from src.retrieve.compressor import Compressor
@@ -49,7 +51,8 @@ README_NAMES = ("README.md", "README.rst", "README.txt", "README")
 
 @dataclass
 class IngestReport:
-    repo: str
+    source_id: str
+    name: str
     file_count: int
     chunk_count: int
 
@@ -57,8 +60,11 @@ class IngestReport:
 class Pipeline:
     """Owns one instance of each pipeline stage and wires the full ingest/query flows.
 
-    Ingest: clone -> walk -> AST-chunk + summarize -> contextualize -> embed -> index.
-    Query: embed -> route to files -> hybrid search -> cross-rerank -> compress -> answer.
+    Ingest, per source kind:
+      repo         clone -> walk -> AST-chunk + summarize -> contextualize -> embed -> index
+      pdf/docx/text load -> chunk (line-based) -> template-summarize -> contextualize -> embed -> index
+    Query: (standalone question) embed -> route -> hybrid search -> cross-rerank -> compress
+           -> answer (raw question + chat history + compressed chunks).
     """
 
     def __init__(self, settings: Settings):
@@ -66,19 +72,21 @@ class Pipeline:
 
         self.repo_loader = RepoLoader()
         tokenizer = Tokenizer()
+        self.recursive_chunker = RecursiveChunker(
+            tokenizer, settings.chunk_max_chars, settings.chunk_overlap
+        )
         self.ast_chunker = ASTChunker(
-            tokenizer,
-            RecursiveChunker(tokenizer, settings.chunk_max_chars, settings.chunk_overlap),
-            settings.chunk_max_chars,
-            settings.chunk_overlap,
+            tokenizer, self.recursive_chunker, settings.chunk_max_chars, settings.chunk_overlap
         )
 
-        # Bulk client: one call per file and per chunk at ingest time.
+        # Bulk client: one call per file and per chunk at ingest time, plus the
+        # cheap standalone-question rewrite at chat time.
         bulk_llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_bulk_model)
         llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
 
         self.summarizer = Summarizer(bulk_llm)
         self.contextualizer = Contextualizer(bulk_llm)
+        self.rewriter = StandaloneRewriter(bulk_llm)
 
         self.embedder = Embedder(settings.embedding_model)
         store = VectorStore(settings.qdrant_url)
@@ -96,39 +104,54 @@ class Pipeline:
         self.answer_generator = AnswerGenerator(llm, CitationParser())
 
     @staticmethod
-    def repo_name(url: str) -> str:
-        """The repo identifier derived from a clone URL — used both to name the local
-        clone/index rows and as the cache key for a completed ingest trace."""
+    def default_source_name(url: str) -> str:
+        """The display name derived from a clone URL when the caller doesn't supply one."""
         return Path(url).stem
 
-    def ingest_repo(self, url: str) -> IngestReport:
-        for event in self._run_ingest(url):
+    # ---------------------------------------------------------------- ingest
+
+    def ingest_source(
+        self, space_id: str, source_id: str, kind: str, name: str,
+        uri: str | None = None, text: str | None = None,
+    ) -> IngestReport:
+        for event in self._run_ingest(space_id, source_id, kind, name, uri, text):
             if isinstance(event, tuple):
                 return event[0]
         raise AssertionError("_run_ingest finished without yielding a result")
 
-    def ingest_repo_trace(self, url: str) -> IngestTrace:
-        """Runs the same ingest as ingest_repo(), but returns per-file/per-chunk detail
-        (summaries, context headers, embedding previews) instead of just counts."""
-        for event in self._run_ingest(url):
+    def ingest_source_trace(
+        self, space_id: str, source_id: str, kind: str, name: str,
+        uri: str | None = None, text: str | None = None,
+    ) -> IngestTrace:
+        for event in self._run_ingest(space_id, source_id, kind, name, uri, text):
             if isinstance(event, tuple):
                 return event[1]
         raise AssertionError("_run_ingest finished without yielding a result")
 
-    def ingest_repo_trace_stream(self, url: str) -> Iterator[IngestProgress | IngestTrace]:
-        """Same ingest as ingest_repo_trace(), but yields IngestProgress updates along the
-        way — powers the ingestion progress bar for large repos, where the per-file
-        summarize/contextualize LLM calls can otherwise run for minutes with no feedback."""
-        for event in self._run_ingest(url):
+    def ingest_source_trace_stream(
+        self, space_id: str, source_id: str, kind: str, name: str,
+        uri: str | None = None, text: str | None = None,
+    ) -> Iterator[IngestProgress | IngestTrace]:
+        for event in self._run_ingest(space_id, source_id, kind, name, uri, text):
             yield event[1] if isinstance(event, tuple) else event
 
     def _run_ingest(
-        self, url: str
+        self, space_id: str, source_id: str, kind: str, name: str,
+        uri: str | None, text: str | None,
     ) -> Iterator[IngestProgress | tuple[IngestReport, IngestTrace]]:
-        repo = self.repo_name(url)
-        yield IngestProgress(stage="clone", message=f"Cloning {repo}…")
-        dest = Path(self.settings.repo_clone_dir) / repo
-        root = self.repo_loader.clone(url, dest)
+        if kind == "repo":
+            if uri is None:
+                raise ValueError("repo sources require a uri")
+            yield from self._run_ingest_repo(space_id, source_id, name, uri)
+        else:
+            yield from self._run_ingest_prose(space_id, source_id, kind, name, uri, text)
+
+    def _run_ingest_repo(
+        self, space_id: str, source_id: str, name: str, uri: str
+    ) -> Iterator[IngestProgress | tuple[IngestReport, IngestTrace]]:
+        yield IngestProgress(stage="clone", message=f"Cloning {name}…")
+        dest = Path(self.settings.repo_clone_dir) / source_id
+        root = self.repo_loader.clone(uri, dest)
         clone_trace = CloneTrace(
             depth=1, commit=self.repo_loader.commit_sha(root), local_path=str(root)
         )
@@ -140,13 +163,7 @@ class Pipeline:
         )
         paths = walk.kept
         if not paths:
-            yield IngestReport(repo=repo, file_count=0, chunk_count=0), IngestTrace(
-                repo=repo,
-                repo_url=url,
-                repo_summary="",
-                clone=clone_trace,
-                walk=walk_trace,
-            )
+            yield self._empty_result(space_id, source_id, "repo", name, uri, clone_trace, walk_trace)
             return
 
         yield IngestProgress(
@@ -154,11 +171,11 @@ class Pipeline:
         )
         readme = self._read_readme(root)
         file_tree = "\n".join(sorted(str(p.relative_to(root)) for p in paths))
-        repo_summary = self.summarizer.summarize_repo(readme, file_tree)
+        collection_summary = self.summarizer.summarize_repo(readme, file_tree)
 
         chunks: list[CodeChunk] = []
         file_summaries: list[FileSummary] = []
-        chunk_spans: list[tuple[int, int]] = []  # per-file (start, end) index range into chunks
+        chunk_spans: list[tuple[int, int]] = []
         for i, path in enumerate(paths):
             yield IngestProgress(
                 stage="process_files",
@@ -167,7 +184,7 @@ class Pipeline:
                 files_total=len(paths),
             )
             language = LANGUAGE_BY_EXT.get(path.suffix, "text")
-            file_chunks = self.ast_chunker.chunk_file(path, root, repo, language)
+            file_chunks = self.ast_chunker.chunk_file(path, root, space_id, source_id, language)
             if not file_chunks:
                 continue
 
@@ -178,41 +195,106 @@ class Pipeline:
             symbols = list(dict.fromkeys(c.symbol_name for c in file_chunks if c.symbol_name))
             code = path.read_text(encoding="utf-8", errors="replace")
             file_summary = self.summarizer.summarize_file(
-                repo, file_path, language, code, symbols, repo_summary
+                space_id, source_id, file_path, language, code, symbols, collection_summary
             )
             file_summaries.append(file_summary)
             start = len(chunks)
             chunks.extend(
-                self.contextualizer.add_context_header(chunk, file_summary, repo_summary)
-                for chunk in file_chunks
+                self.contextualizer.add_context_headers_batch(
+                    file_chunks, file_summary, collection_summary
+                )
             )
             chunk_spans.append((start, len(chunks)))
 
-        if not chunks:
-            yield IngestReport(repo=repo, file_count=0, chunk_count=0), IngestTrace(
-                repo=repo,
-                repo_url=url,
-                repo_summary=repo_summary,
-                clone=clone_trace,
-                walk=walk_trace,
-            )
+        yield IngestProgress(
+            stage="embed", message="Embedding + indexing…", files_done=len(paths), files_total=len(paths)
+        )
+        yield self._finish_ingest(
+            space_id, source_id, "repo", name, uri, collection_summary,
+            file_summaries, chunks, chunk_spans, clone_trace, walk_trace,
+        )
+
+    def _run_ingest_prose(
+        self, space_id: str, source_id: str, kind: str, name: str,
+        uri: str | None, text: str | None,
+    ) -> Iterator[IngestProgress | tuple[IngestReport, IngestTrace]]:
+        yield IngestProgress(stage="load", message=f"Loading {name}…")
+        if kind == "pdf":
+            files = load_pdf(Path(uri), name)
+        elif kind == "docx":
+            files = load_docx(Path(uri), name)
+        elif kind == "text":
+            files = load_text(text or "", name)
+        else:
+            raise ValueError(f"unknown source kind {kind!r}")
+
+        if not files:
+            yield self._empty_result(space_id, source_id, kind, name, uri, None, None)
             return
 
+        chunks: list[CodeChunk] = []
+        file_summaries: list[FileSummary] = []
+        chunk_spans: list[tuple[int, int]] = []
+        for i, logical_file in enumerate(files):
+            yield IngestProgress(
+                stage="process_files",
+                message=f"Chunking {logical_file.name}…",
+                files_done=i,
+                files_total=len(files),
+            )
+            file_summary = self.summarizer.template_summary(
+                space_id, source_id, logical_file.name, "text", logical_file.text
+            )
+            file_chunks = self.recursive_chunker.chunk_text(
+                logical_file.text, logical_file.name, space_id, source_id, "text"
+            )
+            if not file_chunks:
+                continue
+            file_summaries.append(file_summary)
+            start = len(chunks)
+            # Prose skips the LLM header (Contextualizer templates it) — see quick-win note.
+            chunks.extend(self.contextualizer.add_context_headers_batch(file_chunks, file_summary, ""))
+            chunk_spans.append((start, len(chunks)))
+
         yield IngestProgress(
-            stage="embed",
-            message="Embedding + indexing…",
-            files_done=len(paths),
-            files_total=len(paths),
+            stage="embed", message="Embedding + indexing…", files_done=len(files), files_total=len(files)
         )
+        yield self._finish_ingest(
+            space_id, source_id, kind, name, uri, "", file_summaries, chunks, chunk_spans, None, None
+        )
+
+    def _empty_result(
+        self, space_id: str, source_id: str, kind: str, name: str, uri: str | None,
+        clone_trace: CloneTrace | None, walk_trace: WalkTrace | None,
+    ) -> tuple[IngestReport, IngestTrace]:
+        return IngestReport(source_id=source_id, name=name, file_count=0, chunk_count=0), IngestTrace(
+            space_id=space_id, source_id=source_id, name=name, kind=kind, uri=uri,
+            clone=clone_trace, walk=walk_trace,
+        )
+
+    def _finish_ingest(
+        self, space_id: str, source_id: str, kind: str, name: str, uri: str | None,
+        collection_summary: str, file_summaries: list[FileSummary], chunks: list[CodeChunk],
+        chunk_spans: list[tuple[int, int]], clone_trace: CloneTrace | None, walk_trace: WalkTrace | None,
+    ) -> tuple[IngestReport, IngestTrace]:
+        if not chunks:
+            return self._empty_result(space_id, source_id, kind, name, uri, clone_trace, walk_trace)
+
+        # A source is re-ingested wholesale: drop its old chunks first so files removed
+        # upstream (or an entirely re-parsed PDF) don't leave orphaned chunks behind.
         self.doc_index.ensure(self.embedder.dim)
+        self.doc_index.delete_source(space_id, source_id)
         summary_vectors = self.embedder.embed([s.summary for s in file_summaries])
         self.doc_index.upsert(file_summaries, summary_vectors)
 
         self.chunk_index.ensure(self.embedder.dim)
+        self.chunk_index.delete_source(space_id, source_id)
         chunk_vectors = self.embedder.embed([c.embeddable_text for c in chunks])
         self.chunk_index.upsert(chunks, chunk_vectors)
 
-        logger.info("Ingested %s: %d files, %d chunks", repo, len(file_summaries), len(chunks))
+        logger.info(
+            "Ingested %s (%s): %d files, %d chunks", name, kind, len(file_summaries), len(chunks)
+        )
 
         # One shared PCA space across every chunk in this ingest, so chunks from the
         # same file land close together in the vector-space visualization.
@@ -234,49 +316,68 @@ class Pipeline:
             )
             for i, file_summary in enumerate(file_summaries)
         ]
-        report = IngestReport(repo=repo, file_count=len(file_summaries), chunk_count=len(chunks))
-        trace = IngestTrace(
-            repo=repo,
-            repo_url=url,
-            repo_summary=repo_summary,
-            clone=clone_trace,
-            walk=walk_trace,
-            files=files_trace,
+        report = IngestReport(
+            source_id=source_id, name=name, file_count=len(file_summaries), chunk_count=len(chunks)
         )
-        yield report, trace
+        trace = IngestTrace(
+            space_id=space_id, source_id=source_id, name=name, kind=kind, uri=uri,
+            summary=collection_summary, clone=clone_trace, walk=walk_trace, files=files_trace,
+        )
+        return report, trace
+
+    def delete_source(self, space_id: str, source_id: str) -> None:
+        self.chunk_index.delete_source(space_id, source_id)
+        self.doc_index.delete_source(space_id, source_id)
+
+    def delete_space(self, space_id: str) -> None:
+        self.chunk_index.delete_space(space_id)
+        self.doc_index.delete_space(space_id)
+
+    # ----------------------------------------------------------------- query
 
     # Nothing cleared the reranker's relevance floor, so there is no grounded answer to
     # generate. Returning this directly beats sending an empty context to the LLM: same
     # outcome, one fewer call, and it can't hallucinate its way around the gap.
     NO_MATCH = (
-        "That question does not appear to relate to this repository — nothing in the "
-        "indexed code was relevant enough to answer it. If you meant something in this "
-        "codebase, try naming a file, function, or behaviour you are looking for."
+        "That question does not appear to relate to anything in this space — nothing in "
+        "the indexed sources was relevant enough to answer it. If you meant something "
+        "specific, try naming a file, page, or topic you're looking for."
     )
 
-    def query(self, question: str, repo: str) -> Answer:
-        file_paths = self.router.route_to_files(question, repo, self.settings.top_files)
-        candidates = self.hybrid_search.search(
-            question, repo, file_paths, self.settings.hybrid_candidate_k
+    def rewrite_standalone(self, question: str, history: list[tuple[str, str]]) -> str:
+        """One cheap LLM call that resolves history-dependent references ("there", "it")
+        into a self-contained question — the only thing retrieval ever sees. Skipped
+        entirely when history is empty, so single-shot questions pay nothing extra."""
+        return self.rewriter.rewrite(question, history)
+
+    def _wide_fallback_chunks(self, space_id: str, file_paths: list[str]) -> list[CodeChunk]:
+        """Every chunk in the routed file(s), whole — for a question no single chunk can
+        answer on its own (e.g. "summarize this"), rather than the rerank-scored top-k."""
+        if not file_paths:
+            return []
+        return [chunk for chunk, _ in self.chunk_index.fetch_by_files(space_id, file_paths)]
+
+    def _too_large_message(self, file_paths: list[str], token_estimate: int) -> str:
+        return (
+            f"Answering that would need the full content of {len(file_paths)} file(s) "
+            f"(~{token_estimate:,} tokens), which is too large to send in one request "
+            f"(limit: {self.settings.wide_answer_max_tokens:,} tokens). Try asking about a "
+            "specific file, section, or page instead."
         )
-        reranked = self.cross_reranker.rerank(question, candidates, self.settings.rerank_top_k)
-        if not reranked:
-            return Answer(text=self.NO_MATCH, citations=[], confidence=0.0)
 
-        check()  # everything below here is LLM calls — don't start them for a dead caller
-        compressed = self.compressor.compress_batch(question, reranked)
-        final_chunks = [chunk for chunk in compressed if chunk is not None] or reranked
-
-        return self.answer_generator.answer(question, final_chunks)
-
-    def _answer_trace(self, question: str, chunks: list[CodeChunk]) -> AnswerTrace:
+    def _answer_trace(
+        self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None,
+        empty_message: str | None = None,
+    ) -> AnswerTrace:
         """The answer call, wrapped so a failed generation still returns a viewable trace —
         every retrieval stage before it succeeded and is worth showing."""
         if not chunks:
-            return AnswerTrace(text=self.NO_MATCH, confidence=0.0, model=self.settings.llm_model)
+            return AnswerTrace(
+                text=empty_message or self.NO_MATCH, confidence=0.0, model=self.settings.llm_model
+            )
         check()
         try:
-            answer = self.answer_generator.answer(question, chunks)
+            answer = self.answer_generator.answer(question, chunks, history=history)
         except RuntimeError as exc:
             # confidence=0: AnswerTrace defaults to 1.0, which would render a failed
             # answer as a confident one.
@@ -298,7 +399,10 @@ class Pipeline:
             model=self.settings.llm_model,
         )
 
-    def query_trace(self, question: str, repo: str) -> QueryTrace:
+    def query_trace(
+        self, question: str, space_id: str,
+        raw_question: str | None = None, history: list[tuple[str, str]] | None = None,
+    ) -> QueryTrace:
         """Runs the same retrieval stages as query(), returning every stage's intermediate
         scores/chunks alongside the final answer. Logs each stage as it completes."""
         started = time.monotonic()
@@ -307,19 +411,19 @@ class Pipeline:
         def done(step: str, detail: str) -> None:
             logger.info("  [%s] %s (%.1fs elapsed)", step, detail, time.monotonic() - started)
 
-        logger.info("RETRIEVAL START | repo=%s | question=%r", repo, question)
+        logger.info("RETRIEVAL START | space=%s | question=%r", space_id, question)
         try:
             query_vector = self.embedder.embed_one(question)
             done("1/7 embed", f"{len(query_vector)}d query vector")
 
             stage = "route"
-            routed = self.router.route_to_files_scored(question, repo, self.settings.top_files)
+            routed = self.router.route_to_files_scored(question, space_id, self.settings.top_files)
             file_paths = [file_path for file_path, _ in routed]
             done("2/7 route", f"{len(routed)} files shortlisted")
 
             stage = "hybrid-search"
             scored_candidates = self.hybrid_search.search_scored(
-                question, repo, file_paths, self.settings.hybrid_candidate_k
+                question, space_id, file_paths, self.settings.hybrid_candidate_k
             )
             candidate_chunks = [sc.chunk for sc in scored_candidates]
             done("3/7 hybrid", f"{len(candidate_chunks)} candidates")
@@ -338,30 +442,66 @@ class Pipeline:
             reranked_chunks = [chunk for chunk, _ in reranked_scored]
             final_chunk_traces: list[CompressedChunkTrace] = []
             final_chunks: list[CodeChunk] = []
+            wide_fallback = False
+            too_large_message: str | None = None
             check()
-            logger.info("  [5/7 compress] %d chunks in one batched call", len(reranked_chunks))
-            compressed_chunks = self.compressor.compress_batch(question, reranked_chunks)
-            for chunk, compressed in zip(reranked_chunks, compressed_chunks):
-                final_chunk_traces.append(
-                    CompressedChunkTrace(
-                        chunk=compressed if compressed is not None else chunk,
-                        original_line_count=len(chunk.code.splitlines()),
-                        compressed_line_count=(
-                            len(compressed.code.splitlines()) if compressed else 0
-                        ),
-                        dropped=compressed is None,
+            if reranked_chunks:
+                logger.info("  [5/7 compress] %d chunks in one batched call", len(reranked_chunks))
+                compressed_chunks = self.compressor.compress_batch(question, reranked_chunks)
+                for chunk, compressed in zip(reranked_chunks, compressed_chunks):
+                    final_chunk_traces.append(
+                        CompressedChunkTrace(
+                            chunk=compressed if compressed is not None else chunk,
+                            original_line_count=len(chunk.code.splitlines()),
+                            compressed_line_count=(
+                                len(compressed.code.splitlines()) if compressed else 0
+                            ),
+                            dropped=compressed is None,
+                        )
                     )
+                    if compressed is not None:
+                        final_chunks.append(compressed)
+                # falls back to the whole reranked list when compression dropped everything
+                final_chunks = final_chunks or reranked_chunks
+            else:
+                # No chunk answers this on its own — e.g. "summarize this" has no single
+                # matching passage. Try the routed file(s) whole instead of giving up: skip
+                # compression (there's nothing to trim to, we want everything) and gate only
+                # on total size, since sending it all is the point.
+                wide_fallback = True
+                wide_chunks = self._wide_fallback_chunks(space_id, file_paths)
+                token_estimate = (
+                    sum(len(c.embeddable_text) for c in wide_chunks) // Tokenizer.CHARS_PER_TOKEN
                 )
-                if compressed is not None:
-                    final_chunks.append(compressed)
-            # mirrors query()'s `final_chunks = [...] or reranked` fallback when
-            # compression dropped everything
-            final_chunks = final_chunks or reranked_chunks
+                if wide_chunks and token_estimate <= self.settings.wide_answer_max_tokens:
+                    logger.info(
+                        "  [5/7 compress] rerank found nothing — sending %d whole file(s) "
+                        "(~%d tokens) instead", len(file_paths), token_estimate,
+                    )
+                    final_chunks = wide_chunks
+                    final_chunk_traces = [
+                        CompressedChunkTrace(
+                            chunk=chunk,
+                            original_line_count=len(chunk.code.splitlines()),
+                            compressed_line_count=len(chunk.code.splitlines()),
+                            dropped=False,
+                        )
+                        for chunk in wide_chunks
+                    ]
+                elif wide_chunks:
+                    logger.info(
+                        "  [5/7 compress] rerank found nothing and whole-file fallback "
+                        "(~%d tokens) exceeds the %d token budget — refusing",
+                        token_estimate, self.settings.wide_answer_max_tokens,
+                    )
+                    too_large_message = self._too_large_message(file_paths, token_estimate)
+                else:
+                    logger.info("  [5/7 compress] rerank found nothing and no routed files to fall back to")
 
             stage = "project"
             # Two PCA spaces for the vector-space visualization — see QueryTrace's field
             # comments for why they're separate.
-            all_file_vectors = self.doc_index.all_vectors(repo)
+            all_file_vectors = self.doc_index.all_vectors(space_id)
             file_xyz_all = project_3d([query_vector] + [v for _, v in all_file_vectors])
             query_file_xyz, file_xyz_rest = file_xyz_all[0], file_xyz_all[1:]
             file_xyz = {
@@ -369,11 +509,11 @@ class Pipeline:
                 for (summary, _), xyz in zip(all_file_vectors, file_xyz_rest)
             }
 
-            # Every chunk in the repo, not just the routed-file pool — shared by the
+            # Every chunk in the space, not just the routed-file pool — shared by the
             # hybrid/rerank/compress plots and the "whole vector space" modal, so the
             # query lands in the same spot in both instead of two differently-scoped
             # projections.
-            whole_chunk_pool = self.chunk_index.fetch_by_files(repo, [])
+            whole_chunk_pool = self.chunk_index.fetch_by_files(space_id, [])
             whole_chunk_xyz_all = project_3d([query_vector] + [v for _, v in whole_chunk_pool])
             query_whole_chunk_xyz = whole_chunk_xyz_all[0]
             whole_chunk_xyz_rest = whole_chunk_xyz_all[1:]
@@ -382,7 +522,7 @@ class Pipeline:
             }
             # Full CodeChunk objects (whole_chunk_pool) are already in memory here — reuse
             # them for a cheap label per chunk rather than sending the whole chunk (code
-            # included) for every one of what can be hundreds of repo-wide entries.
+            # included) for every one of what can be hundreds of space-wide entries.
             chunk_labels = {
                 chunk.id: f"{chunk.file_path} · {chunk.symbol_name or 'block'}"
                 for chunk, _ in whole_chunk_pool
@@ -397,7 +537,9 @@ class Pipeline:
             )
             raise
 
-        answer_trace = self._answer_trace(question, final_chunks)
+        answer_trace = self._answer_trace(
+            raw_question or question, final_chunks, history, empty_message=too_large_message
+        )
         logger.info(
             "RETRIEVAL DONE in %.1fs | %d citations | conf %.1f",
             time.monotonic() - started, len(answer_trace.citations), answer_trace.confidence,
@@ -405,7 +547,7 @@ class Pipeline:
 
         return QueryTrace(
             question=question,
-            repo=repo,
+            space_id=space_id,
             query_embedding=vector_preview(query_vector),
             routed_files=[RoutedFile(file_path=fp, score=score) for fp, score in routed],
             candidates=[
@@ -423,8 +565,9 @@ class Pipeline:
             ],
             final_chunks=final_chunk_traces,
             rerank_min_top_score=self.settings.rerank_min_top_score,
+            wide_fallback=wide_fallback,
             system_prompt=SYSTEM_PROMPT,
-            final_prompt=self.answer_generator.build_prompt(question, final_chunks),
+            final_prompt=self.answer_generator.build_prompt(raw_question or question, final_chunks),
             answer=answer_trace,
             query_file_xyz=query_file_xyz,
             file_xyz=file_xyz,

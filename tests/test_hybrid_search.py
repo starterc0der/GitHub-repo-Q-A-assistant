@@ -36,7 +36,8 @@ def test_fuse_returns_zero_for_flat_scores() -> None:
 def _chunk(file_path: str, code: str) -> CodeChunk:
     return CodeChunk(
         id=f"{file_path}::1-1",
-        repo="demo",
+        space_id="demo",
+        source_id="src1",
         file_path=file_path,
         language="python",
         symbol_name=None,
@@ -64,7 +65,7 @@ def test_search_fuses_dense_and_bm25_ranking() -> None:
     embedder = FakeEmbedder({"parse input": [1.0, 0.0]})
     search = HybridSearch(embedder, chunk_index, RankFuser(1.0, 0.25))
 
-    results = search.search("parse input", repo="demo", file_paths=[], k=1)
+    results = search.search("parse input", space_id="demo", file_paths=[], k=1)
 
     assert [c.file_path for c in results] == ["a.py"]
 
@@ -74,7 +75,7 @@ def test_search_returns_empty_when_no_candidates() -> None:
     chunk_index.ensure(dim=2)
     search = HybridSearch(FakeEmbedder({}), chunk_index, RankFuser(1.0, 0.25))
 
-    assert search.search("anything", repo="demo", file_paths=[], k=5) == []
+    assert search.search("anything", space_id="demo", file_paths=[], k=5) == []
 
 
 def test_search_scored_exposes_dense_bm25_and_fused_scores() -> None:
@@ -87,7 +88,7 @@ def test_search_scored_exposes_dense_bm25_and_fused_scores() -> None:
     embedder = FakeEmbedder({"parse input": [1.0, 0.0]})
     search = HybridSearch(embedder, chunk_index, RankFuser(1.0, 0.25))
 
-    results = search.search_scored("parse input", repo="demo", file_paths=[], k=2)
+    results = search.search_scored("parse input", space_id="demo", file_paths=[], k=2)
 
     assert [sc.chunk.file_path for sc in results] == ["a.py", "b.py"]
     assert results[0].dense_score > results[1].dense_score

@@ -49,13 +49,15 @@ class HybridSearch:
         self.chunk_index = chunk_index
         self.fuser = fuser
 
-    def search(self, question: str, repo: str, file_paths: list[str], k: int) -> list[CodeChunk]:
-        return [sc.chunk for sc in self.search_scored(question, repo, file_paths, k)]
+    def search(
+        self, question: str, space_id: str, file_paths: list[str], k: int
+    ) -> list[CodeChunk]:
+        return [sc.chunk for sc in self.search_scored(question, space_id, file_paths, k)]
 
     def search_scored(
-        self, question: str, repo: str, file_paths: list[str], k: int
+        self, question: str, space_id: str, file_paths: list[str], k: int
     ) -> list[ScoredChunk]:
-        candidates = self.chunk_index.fetch_by_files(repo, file_paths)
+        candidates = self.chunk_index.fetch_by_files(space_id, file_paths)
         if not candidates:
             return []
         chunks, vectors = zip(*candidates)

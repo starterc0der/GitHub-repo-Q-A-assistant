@@ -7,7 +7,8 @@ from src.retrieve.cross_reranker import CrossReranker
 def _chunk(file_path: str) -> CodeChunk:
     return CodeChunk(
         id=f"{file_path}::1-1",
-        repo="demo",
+        space_id="demo",
+        source_id="src1",
         file_path=file_path,
         language="python",
         symbol_name=None,

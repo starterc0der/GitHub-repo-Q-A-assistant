@@ -51,16 +51,18 @@ class ASTChunker:
         self.max_chars = max_chars
         self.overlap_chars = overlap_chars
 
-    def chunk_file(self, path: Path, root: Path, repo: str, language: str) -> list[CodeChunk]:
+    def chunk_file(
+        self, path: Path, root: Path, space_id: str, source_id: str, language: str
+    ) -> list[CodeChunk]:
         definitions = DEFINITION_TYPES.get(language)
         if definitions is None:
-            return self.fallback.chunk_file(path, root, repo)
+            return self.fallback.chunk_file(path, root, space_id, source_id)
 
         text = path.read_text(encoding="utf-8", errors="replace")
         try:
             tree = get_parser(language).parse(text.encode("utf-8"))
         except Exception:
-            return self.fallback.chunk_file(path, root, repo)
+            return self.fallback.chunk_file(path, root, space_id, source_id)
 
         file_path = str(path.relative_to(root))
         lines = text.splitlines()
@@ -75,7 +77,8 @@ class ASTChunker:
             if code.strip():
                 chunks.append(
                     self._make_chunk(
-                        file_path, repo, language, None, filler_start + 1, end_row, code
+                        file_path, space_id, source_id, language, None,
+                        filler_start + 1, end_row, code,
                     )
                 )
             filler_start = None
@@ -91,12 +94,13 @@ class ASTChunker:
             node_text = node.text.decode("utf-8", errors="replace")
             chunks.extend(
                 self._split_if_oversized(
-                    file_path, repo, language, symbol_name, start_line, end_line, node_text
+                    file_path, space_id, source_id, language, symbol_name,
+                    start_line, end_line, node_text,
                 )
             )
         flush_filler(len(lines))
 
-        return chunks if chunks else self.fallback.chunk_file(path, root, repo)
+        return chunks if chunks else self.fallback.chunk_file(path, root, space_id, source_id)
 
     def _inspect(self, node, definitions: set[str]) -> tuple[str | None, bool]:
         target = node
@@ -114,7 +118,8 @@ class ASTChunker:
     def _split_if_oversized(
         self,
         file_path: str,
-        repo: str,
+        space_id: str,
+        source_id: str,
         language: str,
         symbol_name: str | None,
         start_line: int,
@@ -124,13 +129,15 @@ class ASTChunker:
         if len(node_text) <= self.max_chars:
             return [
                 self._make_chunk(
-                    file_path, repo, language, symbol_name, start_line, end_line, node_text
+                    file_path, space_id, source_id, language, symbol_name,
+                    start_line, end_line, node_text,
                 )
             ]
         return [
             self._make_chunk(
                 file_path,
-                repo,
+                space_id,
+                source_id,
                 language,
                 symbol_name,
                 start_line + rel_start - 1,
@@ -145,7 +152,8 @@ class ASTChunker:
     def _make_chunk(
         self,
         file_path: str,
-        repo: str,
+        space_id: str,
+        source_id: str,
         language: str,
         symbol_name: str | None,
         start_line: int,
@@ -154,7 +162,8 @@ class ASTChunker:
     ) -> CodeChunk:
         return CodeChunk(
             id=f"{file_path}::{start_line}-{end_line}",
-            repo=repo,
+            space_id=space_id,
+            source_id=source_id,
             file_path=file_path,
             language=language,
             symbol_name=symbol_name,

@@ -31,10 +31,14 @@ class LLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
 
-    def complete(self, prompt: str, system: str | None = None) -> str:
-        messages = ([{"role": "system", "content": system}] if system else []) + [
-            {"role": "user", "content": prompt}
-        ]
+    def complete(
+        self, prompt: str, system: str | None = None, history: list[tuple[str, str]] | None = None
+    ) -> str:
+        messages = (
+            ([{"role": "system", "content": system}] if system else [])
+            + [{"role": role, "content": content} for role, content in (history or [])]
+            + [{"role": "user", "content": prompt}]
+        )
         payload = {"model": self.model, "messages": messages, "max_tokens": MAX_TOKENS}
         headers = {"Content-Type": "application/json"}
         if self.api_key:

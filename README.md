@@ -206,10 +206,10 @@ docker compose down              # stop, keep ingested data
 docker compose down -v           # stop and wipe models, vectors, and ingests
 ```
 
-All state lives in named volumes (`qdrant_storage`, `repo_data`, `ingest_cache`,
+All state lives in named volumes (`qdrant_storage`, `repo_data`, `uploads`, `app_db`,
 `hf_cache`), so nothing is written into the working tree and `down -v` is the
-single reset switch. Wiping only *some* of them leaves the trace cache and vector
-store disagreeing; the API returns a 409 telling you to re-ingest.
+single reset switch. Wiping only *some* of them leaves the SQLite metadata and Qdrant
+vectors disagreeing; the API returns a 409 telling you to re-ingest that source.
 
 ### Local Python, Qdrant in Docker
 
@@ -265,11 +265,13 @@ PRELOAD_MODELS=true
 # ── Storage ───────────────────────────────────────────────────────────────────
 QDRANT_URL=http://localhost:6333
 REPO_CLONE_DIR=./data/repos
-INGEST_CACHE_DIR=./data/ingest_cache
+UPLOAD_DIR=./data/uploads
+DB_PATH=./data/app.db
 
 # ── Chunking ──────────────────────────────────────────────────────────────────
 CHUNK_MAX_CHARS=2000
 CHUNK_OVERLAP=200
+HISTORY_TURNS=3
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
 TOP_FILES=8
@@ -303,7 +305,9 @@ RERANK_MIN_TOP_SCORE=0.01
 |---|---|---|
 | `QDRANT_URL` | `http://localhost:6333` | Vector store. Compose overrides this to `http://qdrant:6333` inside the container network. |
 | `REPO_CLONE_DIR` | `./data/repos` | Where repos are shallow-cloned. |
-| `INGEST_CACHE_DIR` | `./data/ingest_cache` | Saved ingest traces, so re-selecting a repo in the UI replays instantly instead of re-ingesting. |
+| `UPLOAD_DIR` | `./data/uploads` | Where uploaded PDF/DOCX files are stored. |
+| `DB_PATH` | `./data/app.db` | SQLite file holding spaces, sources, chats, messages, and the Q&A cache. |
+| `HISTORY_TURNS` | `3` | How many prior user+assistant turns are sent to the LLM as chat context. |
 
 ### Chunking
 

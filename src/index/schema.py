@@ -5,10 +5,16 @@ from dataclasses import dataclass, field
 
 @dataclass
 class CodeChunk:
-    """A retrievable slice of a source file."""
+    """A retrievable slice of a source (a repo file, a PDF page, a docx, pasted text).
+
+    file_path doubles as the citation label: a real relative path for code, or a
+    human-readable location like "Handbook.pdf · p.14" for prose sources — both render
+    identically as "{file_path}:L{start}-L{end}", so citation parsing needs no special case.
+    """
 
     id: str
-    repo: str
+    space_id: str
+    source_id: str
     file_path: str
     language: str
     symbol_name: str | None
@@ -26,9 +32,11 @@ class CodeChunk:
 
 @dataclass
 class FileSummary:
-    """A one-per-file summary used by the routing layer."""
+    """A one-per-logical-file summary used by the routing layer. One "file" is one repo
+    file, one PDF page, or the whole document for docx/pasted text."""
 
-    repo: str
+    space_id: str
+    source_id: str
     file_path: str
     language: str
     summary: str

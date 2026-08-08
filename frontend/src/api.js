@@ -9,29 +9,57 @@ async function request(path, options) {
   return res.json();
 }
 
-function post(path, body) {
+function post(path, body, options) {
   return request(path, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    ...options,
+  });
+}
+
+function patch(path, body) {
+  return request(path, {
+    method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
 
-export function ingestTrace(url) {
-  return post("/ingest/trace", { url });
+function del(path) {
+  return request(path, { method: "DELETE" });
 }
 
-// GET + EventSource, not POST: browsers' EventSource can't send a request body, so the
-// repo URL travels as a query param. Returns a cleanup function that closes the stream —
-// call it on unmount/retry to avoid leaking a connection.
-export function ingestTraceStream(url, { onProgress, onComplete, onError }) {
-  const es = new EventSource(`${API_BASE}/ingest/trace/stream?url=${encodeURIComponent(url)}`);
+// ------------------------------------------------------------------- spaces
 
+export const listSpaces = () => request("/spaces");
+export const createSpace = (body) => post("/spaces", body);
+export const getSpace = (id) => request(`/spaces/${id}`);
+export const updateSpace = (id, body) => patch(`/spaces/${id}`, body);
+export const deleteSpace = (id) => del(`/spaces/${id}`);
+
+// ------------------------------------------------------------------ sources
+
+export const listSources = (spaceId) => request(`/spaces/${spaceId}/sources`);
+export const createSource = (spaceId, body) => post(`/spaces/${spaceId}/sources`, body);
+export const deleteSource = (id) => del(`/sources/${id}`);
+export const sourceTrace = (id) => request(`/sources/${id}/trace`);
+
+export async function uploadSource(spaceId, kind, file) {
+  const form = new FormData();
+  form.append("kind", kind);
+  form.append("file", file);
+  return request(`/spaces/${spaceId}/sources/upload`, { method: "POST", body: form });
+}
+
+// GET + EventSource: polls the source row on the server and streams whatever changed.
+// Reconnect-safe by construction — a refresh just re-attaches to the row's current state.
+export function sourceIngestStream(sourceId, { onProgress, onComplete, onError }) {
+  const es = new EventSource(`${API_BASE}/sources/${sourceId}/ingest/stream`);
   es.onmessage = (e) => {
     const data = JSON.parse(e.data);
-    if (data.type === "progress") {
-      onProgress(data);
-    } else if (data.type === "complete") {
+    if (data.type === "progress") onProgress(data);
+    else if (data.type === "complete") {
       es.close();
       onComplete(data.trace);
     } else if (data.type === "error") {
@@ -39,25 +67,22 @@ export function ingestTraceStream(url, { onProgress, onComplete, onError }) {
       onError(new Error(data.message));
     }
   };
-
   es.onerror = () => {
     es.close();
     onError(new Error("Lost connection to the ingest stream."));
   };
-
   return () => es.close();
 }
 
-export function queryTrace(question, repo) {
-  return post("/query/trace", { question, repo });
-}
+// --------------------------------------------------------------------- chats
 
-export function listRepos() {
-  return request("/repos");
-}
+export const listChats = (spaceId) => request(`/spaces/${spaceId}/chats`);
+export const createChat = (spaceId, title) => post(`/spaces/${spaceId}/chats`, { title });
+export const deleteChat = (id) => del(`/chats/${id}`);
+export const listMessages = (chatId) => request(`/chats/${chatId}/messages`);
+export const messageTrace = (id) => request(`/messages/${id}/trace`);
 
-// Replays a stored ingest trace by repo name. Cache-only on the server, so selecting a
-// previously-ingested repo is instant and never re-runs clone/summarize/embed.
-export function cachedIngestTrace(repo) {
-  return request(`/repos/${encodeURIComponent(repo)}/trace`);
-}
+// signal: an AbortController signal — aborting closes the fetch, which the backend
+// detects via request.is_disconnected() and uses to cancel in-flight LLM calls.
+export const sendMessage = (chatId, content, signal) =>
+  post(`/chats/${chatId}/messages`, { content }, { signal });

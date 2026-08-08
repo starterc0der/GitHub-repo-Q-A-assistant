@@ -31,7 +31,8 @@ class Summarizer:
 
     def summarize_file(
         self,
-        repo: str,
+        space_id: str,
+        source_id: str,
         file_path: str,
         language: str,
         code: str,
@@ -49,5 +50,24 @@ class Summarizer:
             # A single flaky call must not abort ingestion of the whole repo.
             summary = f"{file_path}: {', '.join(symbols) or 'no top-level symbols found'}."
         return FileSummary(
-            repo=repo, file_path=file_path, language=language, summary=summary, symbols=symbols
+            space_id=space_id,
+            source_id=source_id,
+            file_path=file_path,
+            language=language,
+            summary=summary,
+            symbols=symbols,
+        )
+
+    def template_summary(
+        self, space_id: str, source_id: str, file_path: str, language: str, text: str
+    ) -> FileSummary:
+        """No LLM call: prose (PDF/docx/pasted text) is already self-describing, so the
+        raw leading text works fine as the routing-embedding target."""
+        return FileSummary(
+            space_id=space_id,
+            source_id=source_id,
+            file_path=file_path,
+            language=language,
+            summary=text[:500].strip(),
+            symbols=[],
         )

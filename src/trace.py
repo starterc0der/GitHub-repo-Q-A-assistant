@@ -83,11 +83,14 @@ class WalkTrace:
 
 @dataclass
 class IngestTrace:
-    repo: str
-    repo_url: str
-    repo_summary: str
-    clone: CloneTrace
-    walk: WalkTrace
+    space_id: str
+    source_id: str
+    name: str
+    kind: str
+    uri: str | None = None
+    summary: str = ""
+    clone: CloneTrace | None = None
+    walk: WalkTrace | None = None
     files: list[FileTrace] = field(default_factory=list)
 
 
@@ -142,7 +145,7 @@ class CitationTrace:
 @dataclass
 class AnswerTrace:
     """The final generation step. Unlike every other stage this one actually calls the
-    answer LLM, so a query trace costs one Opus request on top of the compression calls."""
+    answer LLM, so a query trace costs one main-model call on top of the compression calls."""
 
     text: str
     citations: list[CitationTrace] = field(default_factory=list)
@@ -154,7 +157,7 @@ class AnswerTrace:
 @dataclass
 class QueryTrace:
     question: str
-    repo: str
+    space_id: str
     query_embedding: EmbeddingPreview
     routed_files: list[RoutedFile] = field(default_factory=list)
     candidates: list[ScoredChunkTrace] = field(default_factory=list)
@@ -165,6 +168,10 @@ class QueryTrace:
     answer: AnswerTrace | None = None
     # Surfaced so the UI can say *why* a stage is empty rather than showing a blank list.
     rerank_min_top_score: float = 0.0
+    # True when no chunk cleared the rerank gate but the routed file(s) were sent whole
+    # instead (a "summarize the whole thing" question, not a "find the fact" one) — lets
+    # the UI avoid saying "nothing answers this" right above an answer that does.
+    wide_fallback: bool = False
     # Two PCA spaces for the vector-space visualization: file-summary embeddings (all
     # files in the repo, for the routing stages) and whole-repo chunk embeddings (every
     # chunk, not just the routed-file pool — shared with the hybrid/rerank/compress plots

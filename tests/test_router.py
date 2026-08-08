@@ -14,20 +14,27 @@ class FakeEmbedder:
         return self.vectors[text]
 
 
-def test_route_to_files_returns_nearest_summary_scoped_to_repo() -> None:
+def _summary(space_id: str, file_path: str, summary: str) -> FileSummary:
+    return FileSummary(
+        space_id=space_id, source_id="src1", file_path=file_path,
+        language="python", summary=summary,
+    )
+
+
+def test_route_to_files_returns_nearest_summary_scoped_to_space() -> None:
     doc_index = DocIndex(VectorStore(":memory:"))
     doc_index.ensure(dim=2)
     doc_index.upsert(
         [
-            FileSummary(repo="demo", file_path="a.py", language="python", summary="parses input"),
-            FileSummary(repo="demo", file_path="b.py", language="python", summary="writes output"),
-            FileSummary(repo="other", file_path="c.py", language="python", summary="parses input"),
+            _summary("demo", "a.py", "parses input"),
+            _summary("demo", "b.py", "writes output"),
+            _summary("other", "c.py", "parses input"),
         ],
         [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
     )
     router = Router(FakeEmbedder({"how do we parse input?": [1.0, 0.0]}), doc_index)
 
-    files = router.route_to_files("how do we parse input?", repo="demo", top_files=1)
+    files = router.route_to_files("how do we parse input?", space_id="demo", top_files=1)
 
     assert files == ["a.py"]
 
@@ -35,13 +42,10 @@ def test_route_to_files_returns_nearest_summary_scoped_to_repo() -> None:
 def test_route_to_files_scored_returns_file_path_and_score_pairs() -> None:
     doc_index = DocIndex(VectorStore(":memory:"))
     doc_index.ensure(dim=2)
-    doc_index.upsert(
-        [FileSummary(repo="demo", file_path="a.py", language="python", summary="parses input")],
-        [[1.0, 0.0]],
-    )
+    doc_index.upsert([_summary("demo", "a.py", "parses input")], [[1.0, 0.0]])
     router = Router(FakeEmbedder({"how do we parse input?": [1.0, 0.0]}), doc_index)
 
-    results = router.route_to_files_scored("how do we parse input?", repo="demo", top_files=1)
+    results = router.route_to_files_scored("how do we parse input?", space_id="demo", top_files=1)
 
     assert results[0][0] == "a.py"
     assert results[0][1] > 0

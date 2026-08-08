@@ -22,9 +22,9 @@ htmlcov/
 *.safetensors
 *.onnx
 
-# generated at runtime: cloned repos, saved ingest traces, vector store
-data/repos/
-data/ingest_cache/
+# entirely local runtime state: cloned repos, uploaded files, sqlite db — nothing
+# under here has ever been tracked, so no reason to enumerate subpaths individually
+data/
 qdrant_storage/
 
 # logs

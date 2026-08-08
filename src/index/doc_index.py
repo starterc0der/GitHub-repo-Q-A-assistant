@@ -19,11 +19,17 @@ class DocIndex:
 
     def ensure(self, dim: int) -> None:
         self.store.ensure_collection(COLLECTION_NAME, dim)
+        self.store.ensure_payload_index(COLLECTION_NAME, "space_id")
+        self.store.ensure_payload_index(COLLECTION_NAME, "source_id")
 
     def upsert(self, summaries: list[FileSummary], vectors: list[list[float]]) -> None:
         points = [
             qmodels.PointStruct(
-                id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{s.repo}::{s.file_path}")),
+                id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL, f"{s.space_id}::{s.source_id}::{s.file_path}"
+                    )
+                ),
                 vector=vector,
                 payload=self._to_payload(s),
             )
@@ -31,32 +37,43 @@ class DocIndex:
         ]
         self.store.upsert(COLLECTION_NAME, points)
 
-    def search(self, vector: list[float], limit: int, repo: str) -> list[FileSummary]:
-        return [summary for summary, _ in self.search_scored(vector, limit, repo)]
+    def delete_source(self, space_id: str, source_id: str) -> None:
+        self.store.delete(COLLECTION_NAME, self._filter(space_id, source_id=source_id))
+
+    def delete_space(self, space_id: str) -> None:
+        self.store.delete(COLLECTION_NAME, self._filter(space_id))
+
+    def search(self, vector: list[float], limit: int, space_id: str) -> list[FileSummary]:
+        return [summary for summary, _ in self.search_scored(vector, limit, space_id)]
 
     def search_scored(
-        self, vector: list[float], limit: int, repo: str
+        self, vector: list[float], limit: int, space_id: str
     ) -> list[tuple[FileSummary, float]]:
-        repo_filter = Filter(
-            must=[qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo))]
+        results = self.store.search(
+            COLLECTION_NAME, vector, limit, query_filter=self._filter(space_id)
         )
-        results = self.store.search(COLLECTION_NAME, vector, limit, query_filter=repo_filter)
         return [(self._to_summary(point), point.score) for point in results]
 
-    def all_vectors(self, repo: str) -> list[tuple[FileSummary, list[float]]]:
-        """Every file summary + its vector for a repo — used to build the routing-stage
+    def all_vectors(self, space_id: str) -> list[tuple[FileSummary, list[float]]]:
+        """Every file summary + its vector for a space — used to build the routing-stage
         vector-space visualization, which needs the whole corpus, not just top-k matches."""
-        repo_filter = Filter(
-            must=[qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo))]
-        )
         records = self.store.scroll(
-            COLLECTION_NAME, query_filter=repo_filter, limit=10_000, with_vectors=True
+            COLLECTION_NAME, query_filter=self._filter(space_id), limit=10_000, with_vectors=True
         )
         return [(self._to_summary(record), record.vector) for record in records]
 
+    def _filter(self, space_id: str, source_id: str | None = None) -> Filter:
+        must = [qmodels.FieldCondition(key="space_id", match=qmodels.MatchValue(value=space_id))]
+        if source_id:
+            must.append(
+                qmodels.FieldCondition(key="source_id", match=qmodels.MatchValue(value=source_id))
+            )
+        return Filter(must=must)
+
     def _to_payload(self, s: FileSummary) -> dict[str, object]:
         return {
-            "repo": s.repo,
+            "space_id": s.space_id,
+            "source_id": s.source_id,
             "file_path": s.file_path,
             "language": s.language,
             "summary": s.summary,
@@ -66,7 +83,8 @@ class DocIndex:
     def _to_summary(self, point: qmodels.ScoredPoint | qmodels.Record) -> FileSummary:
         payload = point.payload
         return FileSummary(
-            repo=payload["repo"],
+            space_id=payload["space_id"],
+            source_id=payload["source_id"],
             file_path=payload["file_path"],
             language=payload["language"],
             summary=payload["summary"],

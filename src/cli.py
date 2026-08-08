@@ -20,14 +20,17 @@ def main() -> None:
     # this builds the real prompt even with no generation backend — paste it into any chat UI
     # judge the system prompt's grounding on its own, separately from model quality.
     prompt_parser = subparsers.add_parser("prompt", help="build the final prompt, don't answer")
-    prompt_parser.add_argument("repo")
+    prompt_parser.add_argument("repo", help="the name used at `ingest` time")
     prompt_parser.add_argument("question")
     prompt_parser.add_argument("-o", "--out", help="write to this file instead of stdout")
 
     args = parser.parse_args()
     if args.command == "ingest":
-        report = Pipeline(settings).ingest_repo(args.url)
-        print(f"Ingested {report.repo}: {report.file_count} files, {report.chunk_count} chunks")
+        # CLI ingest bypasses the spaces DB entirely: space_id == source_id == the repo's
+        # own name, so `prompt` below can address it by that same name.
+        name = Pipeline.default_source_name(args.url)
+        report = Pipeline(settings).ingest_source(name, name, "repo", name, uri=args.url)
+        print(f"Ingested {report.name}: {report.file_count} files, {report.chunk_count} chunks")
     elif args.command == "prompt":
         trace = Pipeline(settings).query_trace(args.question, args.repo)
         text = f"{trace.system_prompt}\n\n---\n\n{trace.final_prompt}\n"

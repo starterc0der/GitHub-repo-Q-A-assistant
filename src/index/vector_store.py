@@ -23,8 +23,21 @@ class VectorStore:
             vectors_config=qmodels.VectorParams(size=dim, distance=qmodels.Distance.COSINE),
         )
 
+    def ensure_payload_index(self, name: str, field: str) -> None:
+        # Every filtered search scopes on this field — without an index each one is a
+        # full collection scan, which was invisible with one repo but not with many spaces.
+        self.client.create_payload_index(
+            collection_name=name, field_name=field, field_schema=qmodels.PayloadSchemaType.KEYWORD
+        )
+
     def upsert(self, name: str, points: list[qmodels.PointStruct]) -> None:
         self.client.upsert(collection_name=name, points=points)
+
+    def delete(self, name: str, query_filter: Filter) -> None:
+        self.client.delete(collection_name=name, points_selector=qmodels.FilterSelector(filter=query_filter))
+
+    def retrieve(self, name: str, ids: list[str]) -> list[qmodels.Record]:
+        return self.client.retrieve(collection_name=name, ids=ids, with_vectors=False)
 
     def search(
         self,

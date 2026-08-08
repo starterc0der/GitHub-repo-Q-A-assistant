@@ -65,17 +65,23 @@ class Tokenizer:
 
 
 class RecursiveChunker:
-    """Naive line-boundary chunker — the M1 baseline, kept for eval comparison."""
+    """Naive line-boundary chunker — the M1 baseline, kept for eval comparison, and the
+    only chunker prose sources (PDF/docx/pasted text) need since they have no AST."""
 
     def __init__(self, tokenizer: Tokenizer, max_chars: int = 2000, overlap_chars: int = 200):
         self.tokenizer = tokenizer
         self.max_chars = max_chars
         self.overlap_chars = overlap_chars
 
-    def chunk_file(self, path: Path, root: Path, repo: str) -> list[CodeChunk]:
+    def chunk_file(self, path: Path, root: Path, space_id: str, source_id: str) -> list[CodeChunk]:
         text = path.read_text(encoding="utf-8", errors="replace")
         language = LANGUAGE_BY_EXT.get(path.suffix, "text")
         file_path = str(path.relative_to(root))
+        return self.chunk_text(text, file_path, space_id, source_id, language)
+
+    def chunk_text(
+        self, text: str, file_path: str, space_id: str, source_id: str, language: str = "text"
+    ) -> list[CodeChunk]:
         chunks = []
         for block, start_line, end_line in self.tokenizer.split_with_lines(
             text, self.max_chars, self.overlap_chars
@@ -83,7 +89,8 @@ class RecursiveChunker:
             chunks.append(
                 CodeChunk(
                     id=f"{file_path}::{start_line}-{end_line}",
-                    repo=repo,
+                    space_id=space_id,
+                    source_id=source_id,
                     file_path=file_path,
                     language=language,
                     symbol_name=None,

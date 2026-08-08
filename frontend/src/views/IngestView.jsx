@@ -2,13 +2,25 @@ import { Fragment, useState } from "react";
 import { RagChunkCard, RagEmbedding, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
 import { RagVectorSpace, pointsForIngestChunks } from "../components/RagVectorSpace.jsx";
 
-export const INGEST_STAGES = [
+const REPO_STAGES = [
   { id: "clone", title: "Clone repo" },
   { id: "walk", title: "Walk files" },
   { id: "chunk", title: "AST-chunk" },
   { id: "contextualize", title: "Summarize + contextualize" },
   { id: "embed", title: "Embed + upsert" },
 ];
+
+// PDF/docx/pasted-text sources have no clone/walk step and no LLM summary or context
+// header (see Contextualizer's prose fast-path) — same tail, shorter head.
+const PROSE_STAGES = [
+  { id: "chunk", title: "Chunk" },
+  { id: "contextualize", title: "Template summaries" },
+  { id: "embed", title: "Embed + upsert" },
+];
+
+export function ingestStagesFor(kind) {
+  return kind === "repo" ? REPO_STAGES : PROSE_STAGES;
+}
 
 const MAX_FILES_SHOWN = 8;
 
@@ -35,7 +47,7 @@ function totalChunks(data) {
 function ingestStageMeta(data, id) {
   switch (id) {
     case "clone":
-      return data.repo;
+      return data.name;
     case "walk":
       return `${data.walk.kept} files kept`;
     case "chunk":
@@ -50,9 +62,10 @@ function ingestStageMeta(data, id) {
 }
 
 export function IngestStageList({ data, statuses, current, onSelect }) {
+  const stages = ingestStagesFor(data.kind);
   return (
     <div className="rag-steps">
-      {INGEST_STAGES.map((s, i) => (
+      {stages.map((s, i) => (
         <RagStageStep
           key={s.id}
           num={i + 1}
@@ -61,7 +74,7 @@ export function IngestStageList({ data, statuses, current, onSelect }) {
           status={statuses[s.id]}
           current={current === s.id}
           onClick={() => onSelect(s.id)}
-          isLast={i === INGEST_STAGES.length - 1}
+          isLast={i === stages.length - 1}
         />
       ))}
     </div>
@@ -70,29 +83,30 @@ export function IngestStageList({ data, statuses, current, onSelect }) {
 
 export function IngestSections({ data, visible }) {
   const { shown, hidden: hiddenCount, toggle } = useFileSlice(data.files);
+  const stageNum = (id) => ingestStagesFor(data.kind).findIndex((s) => s.id === id) + 1;
 
   return (
     <Fragment>
-      {visible.clone && (
+      {visible.clone && data.clone && (
         <RagSection
           id="clone"
-          num="1"
+          num={stageNum("clone")}
           title="Clone repo"
           description="git clone --depth 1 — shallow, no history."
           plain="Like copying a folder of code onto your computer so you can look through it — without downloading its entire history."
         >
           <div className="rag-kv">
-            <div><span className="rag-kv__k">source</span><span className="rag-kv__v rag-mono">{data.repo_url}</span></div>
+            <div><span className="rag-kv__k">source</span><span className="rag-kv__v rag-mono">{data.uri}</span></div>
             <div><span className="rag-kv__k">commit</span><span className="rag-kv__v rag-mono">{data.clone.commit}</span></div>
             <div><span className="rag-kv__k">local path</span><span className="rag-kv__v rag-mono">{data.clone.local_path}</span></div>
           </div>
         </RagSection>
       )}
 
-      {visible.walk && (
+      {visible.walk && data.walk && (
         <RagSection
           id="walk"
-          num="2"
+          num={stageNum("walk")}
           title="Walk files"
           description="Extension + size filtered; skips vendor dirs, lockfiles, binaries."
           plain="Skip the junk — build folders, dependency folders, huge or generated files — and keep only the real, hand-written source code."
@@ -124,10 +138,14 @@ export function IngestSections({ data, visible }) {
       {visible.chunk && (
         <RagSection
           id="chunk"
-          num="3"
-          title="AST-chunk"
-          description="tree-sitter splits on function/class boundaries — a chunk is always a whole definition."
-          plain="Cut each file into logical pieces — whole functions and classes — instead of chopping every N characters and slicing a function in half."
+          num={stageNum("chunk")}
+          title={data.kind === "repo" ? "AST-chunk" : "Chunk"}
+          description={
+            data.kind === "repo"
+              ? "tree-sitter splits on function/class boundaries — a chunk is always a whole definition."
+              : "Split on line boundaries with overlap — no function/class structure to split on in prose."
+          }
+          plain="Cut each source into pieces small enough to search and cite individually."
         >
           {shown.map((file) => (
             <div className="rag-file" key={file.file_path}>
@@ -149,15 +167,21 @@ export function IngestSections({ data, visible }) {
       {visible.contextualize && (
         <RagSection
           id="contextualize"
-          num="4"
-          title="Summarize + contextualize"
-          description="An LLM writes a file summary (feeds routing) and a one-sentence context header per chunk (feeds embedding)."
-          plain="An AI writes a short note above each piece of code explaining what it does and which file it's from — so a tiny, out-of-context snippet still makes sense on its own."
+          num={stageNum("contextualize")}
+          title={data.kind === "repo" ? "Summarize + contextualize" : "Template summaries"}
+          description={
+            data.kind === "repo"
+              ? "An LLM writes a file summary (feeds routing) and a one-sentence context header per chunk (feeds embedding)."
+              : "Prose is already self-describing, so both the routing summary and the chunk header are templated — no LLM call."
+          }
+          plain="A short note above each piece explaining what it is and where it's from — so a tiny, out-of-context snippet still makes sense on its own."
         >
-          <div className="rag-callout">
-            <span className="rag-callout__label">repo summary</span>
-            <p>{data.repo_summary}</p>
-          </div>
+          {data.summary && (
+            <div className="rag-callout">
+              <span className="rag-callout__label">summary</span>
+              <p>{data.summary}</p>
+            </div>
+          )}
           {shown.map((file) => (
             <div className="rag-file" key={file.file_path}>
               <div className="rag-file__head">
@@ -180,7 +204,7 @@ export function IngestSections({ data, visible }) {
       {visible.embed && (
         <RagSection
           id="embed"
-          num="5"
+          num={stageNum("embed")}
           title="Embed + upsert"
           description="Summaries embed into file_summaries (routing); context-headered chunks embed into chunks (retrieval)."
           plain="Turn every note and code piece into a list of numbers (a 'vector') that captures its meaning — similar code ends up with similar numbers, so 'closeness' becomes measurable."
