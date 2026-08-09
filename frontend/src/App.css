@@ -427,6 +427,19 @@
 .rag-source-row__main { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
 .rag-source-row__name { font-weight: 600; font-size: 13.5px; }
 .rag-source-row__stat { font-size: 12px; }
+
+/* circular ingest-progress ring — determinate (real %) or a spinning indeterminate arc */
+.rag-ring { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.rag-ring__svg { width: 18px; height: 18px; transform-origin: 50% 50%; }
+.rag-ring__track { fill: none; stroke: var(--border-strong); stroke-width: 3; }
+.rag-ring__fill {
+  fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+.rag-ring__svg--spin { animation: ragRingSpin 1s linear infinite; }
+@keyframes ragRingSpin { to { transform: rotate(270deg); } }
+@media (prefers-reduced-motion: reduce) { .rag-ring__svg--spin { animation: none; } }
+.rag-ring__pct { font-size: 10.5px; font-weight: 700; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
 .rag-source-row__actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .rag-source-row__actions .rag-btn--ghost { margin-top: 0; padding: 6px 10px; font-size: 12.5px; }
 
@@ -471,6 +484,24 @@
 }
 .rag-bubble--user .rag-inline-code { background: oklch(100% 0 0 / 0.2); }
 .rag-bubble__foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+
+/* chart block emitted by the answer model for comparison/graph questions */
+.rag-chart { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 10px; margin-top: 8px; }
+.rag-bubble--user .rag-chart { background: oklch(100% 0 0 / 0.12); border-color: oklch(100% 0 0 / 0.25); }
+.rag-chart__title { font-size: 12.5px; font-weight: 700; margin-bottom: 4px; }
+.rag-chart__svg { width: 100%; display: block; }
+/* Many-category horizontal charts grow taller than they should sit inline — cap the
+   height and let the chart scroll internally instead of ballooning the message bubble. */
+.rag-chart__scroll { max-height: 280px; overflow-y: auto; }
+.rag-chart__axis { stroke: var(--border-strong); stroke-width: 1; }
+.rag-chart__value { font-size: 9px; fill: var(--ink-dim); }
+.rag-bubble--user .rag-chart__value { fill: white; opacity: 0.9; }
+.rag-chart__cat { font-size: 9.5px; fill: var(--ink-dim); }
+.rag-bubble--user .rag-chart__cat { fill: white; opacity: 0.85; }
+.rag-chart__legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.rag-chart__legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-dim); }
+.rag-bubble--user .rag-chart__legend-item { color: white; opacity: 0.9; }
+.rag-chart__swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 
 /* fullscreen pipeline-breakdown overlay (query or ingest trace) */
 .rag-overlay { position: fixed; inset: 0; z-index: 150; background: var(--bg); display: flex; flex-direction: column; animation: ragFadeIn 0.2s ease both; }

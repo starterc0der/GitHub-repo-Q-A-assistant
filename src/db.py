@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS spaces (
 CREATE TABLE IF NOT EXISTS sources (
   id TEXT PRIMARY KEY,
   space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL CHECK (kind IN ('repo','pdf','docx','text')),
+  kind TEXT NOT NULL CHECK (kind IN ('repo','pdf','docx','text','csv')),
   name TEXT NOT NULL,
   uri TEXT,
   meta TEXT NOT NULL DEFAULT '{}',
@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
   cache_hit INTEGER NOT NULL DEFAULT 0,
   cached_from TEXT,
   trace TEXT,
+  chart TEXT,
   created_at TEXT NOT NULL,
   UNIQUE (chat_id, seq)
 );
@@ -99,6 +100,37 @@ def connect(db_path: str):
 def init_db(db_path: str) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        # ponytail: no migration framework by design — one-off patches only if this trivial.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "chart" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN chart TEXT")
+        # SQLite can't ALTER a CHECK constraint — recreate the table to widen 'kind'.
+        sources_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'"
+        ).fetchone()
+        if sources_sql and "'csv'" not in sources_sql["sql"]:
+            conn.executescript("""
+                ALTER TABLE sources RENAME TO sources_old;
+                CREATE TABLE sources (
+                  id TEXT PRIMARY KEY,
+                  space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL CHECK (kind IN ('repo','pdf','docx','text','csv')),
+                  name TEXT NOT NULL,
+                  uri TEXT,
+                  meta TEXT NOT NULL DEFAULT '{}',
+                  status TEXT NOT NULL DEFAULT 'pending'
+                         CHECK (status IN ('pending','ingesting','ready','failed')),
+                  error TEXT,
+                  file_count INTEGER NOT NULL DEFAULT 0,
+                  chunk_count INTEGER NOT NULL DEFAULT 0,
+                  ingest_trace TEXT,
+                  created_at TEXT NOT NULL,
+                  ingested_at TEXT
+                );
+                INSERT INTO sources SELECT * FROM sources_old;
+                DROP TABLE sources_old;
+                CREATE INDEX IF NOT EXISTS idx_sources_space ON sources(space_id);
+            """)
 
 
 def sweep_stale_ingests(db_path: str) -> int:

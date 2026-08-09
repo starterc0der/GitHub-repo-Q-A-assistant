@@ -57,3 +57,23 @@ def test_template_summary_skips_the_llm_and_truncates() -> None:
 
     assert len(result.summary) == 500
     assert result.symbols == []
+
+
+def test_summarize_csv_uses_llm_response_and_sets_csv_language() -> None:
+    summarizer = Summarizer(FakeLLM(response="Phone specs: name and price."))
+
+    result = summarizer.summarize_csv(
+        "demo", "src1", "phones.csv", "Name,Price\niPhone 16,799\niPhone 17,899\n"
+    )
+
+    assert result.summary == "Phone specs: name and price."
+    assert result.language == "csv"
+    assert result.symbols == []
+
+
+def test_summarize_csv_falls_back_to_header_on_llm_failure() -> None:
+    summarizer = Summarizer(FakeLLM(fail=True))
+
+    result = summarizer.summarize_csv("demo", "src1", "phones.csv", "Name,Price\niPhone 16,799\n")
+
+    assert result.summary == "CSV data with columns: Name,Price"

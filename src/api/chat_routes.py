@@ -65,16 +65,17 @@ def _insert_message(
     cache_hit: bool = False,
     cached_from: str | None = None,
     trace: str | None = None,
+    chart: str | None = None,
 ) -> str:
     message_id = new_id()
     with connect(settings.db_path) as conn:
         conn.execute(
             "INSERT INTO messages "
-            "(id, chat_id, seq, role, content, standalone_question, cache_hit, cached_from, trace, created_at) "
-            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
+            "(id, chat_id, seq, role, content, standalone_question, cache_hit, cached_from, trace, chart, created_at) "
+            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
             (
                 message_id, chat_id, role, content, standalone_question,
-                int(cache_hit), cached_from, trace, now(), chat_id,
+                int(cache_hit), cached_from, trace, chart, now(), chat_id,
             ),
         )
     return message_id
@@ -172,16 +173,21 @@ def delete_chat(chat_id: str) -> dict[str, str]:
     return {"status": "deleted"}
 
 
+def _parse_chart(row: dict[str, object]) -> dict[str, object]:
+    row["chart"] = json.loads(row["chart"]) if row.get("chart") else None
+    return row
+
+
 @router.get("/chats/{chat_id}/messages")
 def list_messages(chat_id: str) -> dict[str, object]:
     _get_chat_row(chat_id)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
-            "SELECT id, role, content, standalone_question, cache_hit, cached_from, created_at, "
+            "SELECT id, role, content, standalone_question, cache_hit, cached_from, chart, created_at, "
             "(trace IS NOT NULL) AS has_trace FROM messages WHERE chat_id=? ORDER BY seq",
             (chat_id,),
         ).fetchall()
-    return {"messages": [dict(r) for r in rows]}
+    return {"messages": [_parse_chart(dict(r)) for r in rows]}
 
 
 @router.get("/messages/{message_id}/trace")
@@ -225,6 +231,7 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
             assistant_id = _insert_message(
                 chat_id, "assistant", cached["content"],
                 cache_hit=True, cached_from=cached["id"], trace=cached["trace"],
+                chart=cached["chart"],
             )
             _touch_chat(chat_id)
             return JSONResponse(_get_message(assistant_id))
@@ -250,7 +257,11 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
     # answer.text is "" (not missing) on an LLM failure — `or` catches that; a plain
     # dict.get default would not, since the key is present.
     content = answer.get("text") or answer.get("error") or pipeline.NO_MATCH
-    assistant_id = _insert_message(chat_id, "assistant", content, trace=json.dumps(trace))
+    chart = answer.get("chart")
+    assistant_id = _insert_message(
+        chat_id, "assistant", content, trace=json.dumps(trace),
+        chart=json.dumps(chart) if chart else None,
+    )
 
     if not history:
         _cache_put(space_id, raw_question, assistant_id)
@@ -263,8 +274,8 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
 def _get_message(message_id: str) -> dict[str, object]:
     with connect(settings.db_path) as conn:
         row = conn.execute(
-            "SELECT id, role, content, standalone_question, cache_hit, cached_from, created_at, "
+            "SELECT id, role, content, standalone_question, cache_hit, cached_from, chart, created_at, "
             "(trace IS NOT NULL) AS has_trace FROM messages WHERE id=?",
             (message_id,),
         ).fetchone()
-    return dict(row)
+    return _parse_chart(dict(row))

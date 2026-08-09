@@ -9,7 +9,7 @@ from src.cancellation import check, interruptible_sleep
 
 logger = logging.getLogger(__name__)
 
-MAX_TOKENS = 4096
+MAX_TOKENS = 8192
 
 
 class LLMClient:

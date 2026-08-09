@@ -152,6 +152,9 @@ class AnswerTrace:
     confidence: float = 1.0
     model: str = ""
     error: str = ""
+    # {"title", "categories": [...], "series": [{"name", "values": [...]}]} — only set on
+    # comparison/graph questions where the model emitted a chart block; see ChartParser.
+    chart: dict | None = None
 
 
 @dataclass
@@ -168,10 +171,9 @@ class QueryTrace:
     answer: AnswerTrace | None = None
     # Surfaced so the UI can say *why* a stage is empty rather than showing a blank list.
     rerank_min_top_score: float = 0.0
-    # True when no chunk cleared the rerank gate but the routed file(s) were sent whole
-    # instead (a "summarize the whole thing" question, not a "find the fact" one) — lets
-    # the UI avoid saying "nothing answers this" right above an answer that does.
+    # Whole source(s) sent instead of the rerank-scored top-k; reason is the human-readable why.
     wide_fallback: bool = False
+    wide_fallback_reason: str = ""
     # Two PCA spaces for the vector-space visualization: file-summary embeddings (all
     # files in the repo, for the routing stages) and whole-repo chunk embeddings (every
     # chunk, not just the routed-file pool — shared with the hybrid/rerank/compress plots

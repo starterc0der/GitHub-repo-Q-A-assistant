@@ -15,6 +15,12 @@ REPO_SYSTEM_PROMPT = (
     "paragraph describing what the project does and how it's organized. No preamble."
 )
 
+CSV_SYSTEM_PROMPT = (
+    "You summarize a CSV dataset for a search index, from its column names and a few "
+    "sample rows. Reply with one sentence describing what the data represents. "
+    "No preamble, no markdown."
+)
+
 
 class Summarizer:
     """Generates the file- and repo-level summaries that back the routing index."""
@@ -56,6 +62,24 @@ class Summarizer:
             language=language,
             summary=summary,
             symbols=symbols,
+        )
+
+    def summarize_csv(
+        self, space_id: str, source_id: str, file_path: str, text: str, sample_rows: int = 5
+    ) -> FileSummary:
+        """One call per CSV, not per chunk — cheap, and helps routing tell unrelated CSVs
+        apart better than raw column names/sample rows alone."""
+        lines = text.splitlines()
+        header = lines[0] if lines else ""
+        sample = "\n".join(lines[1 : 1 + sample_rows])
+        prompt = f"Columns: {header}\n\nSample rows:\n{sample}"
+        try:
+            summary = self.llm.complete(prompt, system=CSV_SYSTEM_PROMPT).strip()
+        except RuntimeError:
+            summary = f"CSV data with columns: {header}"
+        return FileSummary(
+            space_id=space_id, source_id=source_id, file_path=file_path,
+            language="csv", summary=summary, symbols=[],
         )
 
     def template_summary(

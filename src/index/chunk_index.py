@@ -69,6 +69,18 @@ class ChunkIndex:
         )
         return [(self._to_chunk(record), record.vector) for record in records]
 
+    def fetch_by_sources(self, space_id: str, source_ids: list[str]) -> list[CodeChunk]:
+        """Every chunk belonging to any of the given sources — unlike fetch_by_files, not
+        limited to whichever files routing's top_files cap let through, so a whole-document
+        fallback reads the entire source instead of a routing-sized slice of it. No vectors:
+        this is a whole-document read, not a similarity search."""
+        if not source_ids:
+            return []
+        records = self.store.scroll(
+            COLLECTION_NAME, query_filter=self._filter(space_id, source_ids=source_ids), limit=10_000
+        )
+        return [self._to_chunk(record) for record in records]
+
     def fetch_by_ids(self, chunk_ids: list[str]) -> list[CodeChunk]:
         """Rehydrate chunk bodies by their stable point id — used to redisplay a stored
         trace without re-embedding or re-storing the chunk body per message."""
@@ -84,12 +96,17 @@ class ChunkIndex:
         return self.point_id(chunk.space_id, chunk.source_id, chunk.id)
 
     def _filter(
-        self, space_id: str, file_paths: list[str] | None = None, source_id: str | None = None
+        self, space_id: str, file_paths: list[str] | None = None,
+        source_id: str | None = None, source_ids: list[str] | None = None,
     ) -> Filter:
         must = [qmodels.FieldCondition(key="space_id", match=qmodels.MatchValue(value=space_id))]
         if source_id:
             must.append(
                 qmodels.FieldCondition(key="source_id", match=qmodels.MatchValue(value=source_id))
+            )
+        if source_ids:
+            must.append(
+                qmodels.FieldCondition(key="source_id", match=qmodels.MatchAny(any=source_ids))
             )
         if file_paths:
             must.append(

@@ -39,7 +39,7 @@ def test_route_to_files_returns_nearest_summary_scoped_to_space() -> None:
     assert files == ["a.py"]
 
 
-def test_route_to_files_scored_returns_file_path_and_score_pairs() -> None:
+def test_route_to_files_scored_returns_file_path_source_id_and_score() -> None:
     doc_index = DocIndex(VectorStore(":memory:"))
     doc_index.ensure(dim=2)
     doc_index.upsert([_summary("demo", "a.py", "parses input")], [[1.0, 0.0]])
@@ -47,5 +47,7 @@ def test_route_to_files_scored_returns_file_path_and_score_pairs() -> None:
 
     results = router.route_to_files_scored("how do we parse input?", space_id="demo", top_files=1)
 
-    assert results[0][0] == "a.py"
-    assert results[0][1] > 0
+    file_path, source_id, score = results[0]
+    assert file_path == "a.py"
+    assert source_id == "src1"
+    assert score > 0

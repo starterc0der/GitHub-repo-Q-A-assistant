@@ -1,11 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 import { createSource, deleteSource, sourceIngestStream, sourceTrace, uploadSource } from "../api.js";
+import { cls } from "./RagAtoms.jsx";
 import { PipelineOverlay } from "./PipelineOverlay.jsx";
 
-const KIND_LABEL = { repo: "REPO", pdf: "PDF", docx: "DOC", text: "TXT" };
+const KIND_LABEL = { repo: "REPO", pdf: "PDF", docx: "DOC", text: "TXT", csv: "CSV" };
 
 function SourceBadge({ kind }) {
   return <span className="rag-tag rag-tag--neutral">{KIND_LABEL[kind] || kind.toUpperCase()}</span>;
+}
+
+const RING_R = 9;
+const RING_C = 2 * Math.PI * RING_R;
+
+// files_total is 0 during stages with no known count yet (clone/walk/summarize) — shown
+// as a spinning ring; process_files/embed have a real done/total, shown as a filled arc.
+function IngestRing({ progress }) {
+  const determinate = progress.files_total > 0;
+  const pct = determinate ? Math.round((progress.files_done / progress.files_total) * 100) : 0;
+  const offset = determinate ? RING_C - (pct / 100) * RING_C : RING_C * 0.75;
+
+  return (
+    <span className="rag-ring" title={progress.message}>
+      <svg viewBox="0 0 24 24" className={cls("rag-ring__svg", !determinate && "rag-ring__svg--spin")}>
+        <g transform="rotate(-90 12 12)">
+          <circle cx="12" cy="12" r={RING_R} className="rag-ring__track" />
+          <circle
+            cx="12" cy="12" r={RING_R} className="rag-ring__fill"
+            strokeDasharray={RING_C} strokeDashoffset={offset}
+          />
+        </g>
+      </svg>
+      {determinate && <span className="rag-ring__pct">{pct}%</span>}
+    </span>
+  );
 }
 
 // Subscribes to one source's ingest SSE while it's ingesting; reports live progress and
@@ -58,7 +85,10 @@ function SourceRow({ source, onRefresh, onDelete }) {
           </span>
         )}
         {source.status === "ingesting" && (
-          <span className="rag-dim rag-source-row__stat">{progress?.message || "Ingesting…"}</span>
+          <>
+            <IngestRing progress={progress || { message: "Ingesting…", files_done: 0, files_total: 0 }} />
+            <span className="rag-dim rag-source-row__stat">{progress?.message || "Ingesting…"}</span>
+          </>
         )}
         {source.status === "failed" && <span className="rag-error">{source.error}</span>}
       </div>
@@ -128,9 +158,9 @@ function AddSourceForm({ spaceId, onAdded }) {
     e.target.value = "";
     if (!file) return;
     const ext = file.name.split(".").pop().toLowerCase();
-    const kind = ext === "pdf" ? "pdf" : ext === "docx" ? "docx" : null;
+    const kind = { pdf: "pdf", docx: "docx", csv: "csv" }[ext];
     if (!kind) {
-      setError("Only .pdf and .docx files are supported.");
+      setError("Only .pdf, .docx, and .csv files are supported.");
       return;
     }
     setBusy(true);
@@ -152,9 +182,9 @@ function AddSourceForm({ spaceId, onAdded }) {
           Connect GitHub repo
         </button>
         <button className="rag-btn rag-btn--ghost" onClick={() => fileRef.current?.click()} disabled={busy}>
-          Upload PDF/Doc
+          Upload PDF/Doc/CSV
         </button>
-        <input ref={fileRef} type="file" accept=".pdf,.docx" hidden onChange={handleFile} />
+        <input ref={fileRef} type="file" accept=".pdf,.docx,.csv" hidden onChange={handleFile} />
         <button className="rag-btn rag-btn--ghost" onClick={() => setMode(mode === "text" ? null : "text")}>
           Paste text
         </button>

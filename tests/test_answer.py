@@ -49,3 +49,24 @@ def test_parse_splits_a_grouped_bracket_into_separate_citations() -> None:
     assert len(citations) == 2
     assert [(c.start_line, c.end_line) for c in citations] == [(62, 62), (87, 87)]
     assert all(c.file_path == "src/pipeline.py" for c in citations)
+
+
+def test_parse_accepts_a_bare_line_number_with_no_dash() -> None:
+    """Models sometimes cite a single row as [file:L5] instead of [file:L5-L5] — common
+    for one-row citations like a CSV row. Must still resolve, not silently match nothing."""
+    chunk = _chunk("cars.csv", 472, 472, "Nissan Ariya,electric,,,")
+    text = "The Nissan Ariya is electric [cars.csv:L472]."
+
+    citations = CitationParser().parse(text, [chunk])
+
+    assert len(citations) == 1
+    assert (citations[0].start_line, citations[0].end_line) == (472, 472)
+
+
+def test_parse_accepts_a_mix_of_bare_and_ranged_lines_in_one_bracket() -> None:
+    chunk = _chunk("cars.csv", 100, 200, "\n".join(f"row{i}" for i in range(100, 201)))
+    text = "See these rows [cars.csv:L105, L150-L152]."
+
+    citations = CitationParser().parse(text, [chunk])
+
+    assert [(c.start_line, c.end_line) for c in citations] == [(105, 105), (150, 152)]

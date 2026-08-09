@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { createChat, deleteChat, listChats, listMessages, messageTrace, sendMessage } from "../api.js";
 import { cls } from "./RagAtoms.jsx";
+import { BarChart } from "./BarChart.jsx";
 import { PipelineOverlay } from "./PipelineOverlay.jsx";
 
 // [file:Lstart-Lend] markers ground the answer, but they're noise in a casual chat
 // bubble — strip them here. They're still fully visible (as resolved, clickable
 // citations with snippets) in "View pipeline breakdown", which is where verifying a
-// claim actually belongs. Matches src/generate/answer.py's CITATION_PATTERN, including
-// the case where the model groups several ranges into one bracket ([path:L1-L5, L9-L12]).
-const CITATION_RE = /\s?\[[^\[\]:]+:L\d+-L\d+(?:\s*,\s*L\d+-L\d+)*\]/g;
+// claim actually belongs. Matches src/generate/answer.py's CITATION_PATTERN: grouped
+// ranges in one bracket ([path:L1-L5, L9-L12]), and a bare single line with no dash
+// ([path:L5], common for a one-row citation like a CSV row).
+const CITATION_RE = /\s?\[[^\[\]:]+:L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*\]/g;
 
 // **bold** and `code` spans only — not a full markdown parser, just the two things the
 // answer model actually produces. Built as React elements (never dangerouslySetInnerHTML),
@@ -75,6 +77,7 @@ function MessageBubble({ message, onViewTrace }) {
   return (
     <div className={cls("rag-bubble", isUser ? "rag-bubble--user" : "rag-bubble--assistant")}>
       <MessageText text={message.content} />
+      {message.chart && <BarChart chart={message.chart} />}
       {!isUser && (
         <div className="rag-bubble__foot">
           {message.cache_hit ? <span className="rag-tag rag-tag--accent2">served from cache</span> : null}

@@ -18,7 +18,11 @@ class Router:
 
     def route_to_files_scored(
         self, question: str, space_id: str, top_files: int
-    ) -> list[tuple[str, float]]:
+    ) -> list[tuple[str, str, float]]:
+        """(file_path, source_id, score) per routed file. source_id is carried through
+        (not just file_path) so a caller can expand from "these routed files" to "every
+        file in the source(s) they belong to" — e.g. a whole-document fallback that must
+        not stay capped at top_files."""
         vector = self.embedder.embed_one(question)
         scored = self.doc_index.search_scored(vector, top_files, space_id)
-        return [(s.file_path, score) for s, score in scored]
+        return [(s.file_path, s.source_id, score) for s, score in scored]

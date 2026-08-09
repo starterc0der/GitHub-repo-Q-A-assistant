@@ -226,7 +226,7 @@ def create_source(space_id: str, request: CreateSourceRequest) -> dict[str, obje
 
 @router.post("/spaces/{space_id}/sources/upload")
 async def upload_source(
-    space_id: str, kind: Literal["pdf", "docx"] = Form(...), file: UploadFile = File(...)
+    space_id: str, kind: Literal["pdf", "docx", "csv"] = Form(...), file: UploadFile = File(...)
 ) -> dict[str, object]:
     _space_row(space_id)
     source_id = new_id()

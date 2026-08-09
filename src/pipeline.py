@@ -9,6 +9,7 @@ from pathlib import Path
 from src.cancellation import Cancelled, check
 from src.config import Settings
 from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator, CitationParser
+from src.generate.intent import BroadIntentClassifier, matches_broad_keywords
 from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
 from src.index.doc_index import DocIndex
@@ -19,7 +20,7 @@ from src.ingest.ast_chunker import ASTChunker
 from src.ingest.chunker import LANGUAGE_BY_EXT, RecursiveChunker, Tokenizer
 from src.ingest.contextualizer import Contextualizer
 from src.ingest.repo_loader import RepoLoader
-from src.ingest.sources import load_docx, load_pdf, load_text
+from src.ingest.sources import chunk_csv, load_csv, load_docx, load_pdf, load_text
 from src.ingest.summarizer import Summarizer
 from src.llm_client import LLMClient
 from src.retrieve.compressor import Compressor
@@ -79,14 +80,15 @@ class Pipeline:
             tokenizer, self.recursive_chunker, settings.chunk_max_chars, settings.chunk_overlap
         )
 
-        # Bulk client: one call per file and per chunk at ingest time, plus the
-        # cheap standalone-question rewrite at chat time.
+        # Bulk client: one call per file and per chunk at ingest time, plus the cheap
+        # standalone-question rewrite and broad-intent classification at chat time.
         bulk_llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_bulk_model)
         llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
 
         self.summarizer = Summarizer(bulk_llm)
         self.contextualizer = Contextualizer(bulk_llm)
         self.rewriter = StandaloneRewriter(bulk_llm)
+        self.intent_classifier = BroadIntentClassifier(bulk_llm)
 
         self.embedder = Embedder(settings.embedding_model)
         store = VectorStore(settings.qdrant_url)
@@ -225,6 +227,8 @@ class Pipeline:
             files = load_docx(Path(uri), name)
         elif kind == "text":
             files = load_text(text or "", name)
+        elif kind == "csv":
+            files = load_csv(Path(uri), name)
         else:
             raise ValueError(f"unknown source kind {kind!r}")
 
@@ -242,18 +246,29 @@ class Pipeline:
                 files_done=i,
                 files_total=len(files),
             )
-            file_summary = self.summarizer.template_summary(
-                space_id, source_id, logical_file.name, "text", logical_file.text
-            )
-            file_chunks = self.recursive_chunker.chunk_text(
-                logical_file.text, logical_file.name, space_id, source_id, "text"
-            )
+            if kind == "csv":
+                # Real summary, one call per CSV (not per chunk) — helps routing tell
+                # different CSVs apart better than raw column names alone.
+                file_summary = self.summarizer.summarize_csv(
+                    space_id, source_id, logical_file.name, logical_file.text
+                )
+                file_chunks = chunk_csv(logical_file.text, logical_file.name, space_id, source_id)
+                # chunk_csv already stamped the header into context_header directly —
+                # Contextualizer would only overwrite it with a generic template.
+            else:
+                file_summary = self.summarizer.template_summary(
+                    space_id, source_id, logical_file.name, "text", logical_file.text
+                )
+                file_chunks = self.recursive_chunker.chunk_text(
+                    logical_file.text, logical_file.name, space_id, source_id, "text"
+                )
+                # Prose skips the LLM header (Contextualizer templates it) — see quick-win note.
+                file_chunks = self.contextualizer.add_context_headers_batch(file_chunks, file_summary, "")
             if not file_chunks:
                 continue
             file_summaries.append(file_summary)
             start = len(chunks)
-            # Prose skips the LLM header (Contextualizer templates it) — see quick-win note.
-            chunks.extend(self.contextualizer.add_context_headers_batch(file_chunks, file_summary, ""))
+            chunks.extend(file_chunks)
             chunk_spans.append((start, len(chunks)))
 
         yield IngestProgress(
@@ -350,16 +365,19 @@ class Pipeline:
         entirely when history is empty, so single-shot questions pay nothing extra."""
         return self.rewriter.rewrite(question, history)
 
-    def _wide_fallback_chunks(self, space_id: str, file_paths: list[str]) -> list[CodeChunk]:
-        """Every chunk in the routed file(s), whole — for a question no single chunk can
-        answer on its own (e.g. "summarize this"), rather than the rerank-scored top-k."""
-        if not file_paths:
+    def _wide_fallback_chunks(self, space_id: str, source_ids: list[str]) -> list[CodeChunk]:
+        """Every chunk in the routed source(s), whole — for a question no single chunk can
+        answer on its own (e.g. "summarize this"). Scoped to whole SOURCES rather than the
+        routed FILES: routing caps at top_files, so a document with more pages/files than
+        that cap would otherwise have its later pages silently missing from the "whole"
+        answer — reading the entire source(s) instead removes that cap."""
+        if not source_ids:
             return []
-        return [chunk for chunk, _ in self.chunk_index.fetch_by_files(space_id, file_paths)]
+        return self.chunk_index.fetch_by_sources(space_id, source_ids)
 
-    def _too_large_message(self, file_paths: list[str], token_estimate: int) -> str:
+    def _too_large_message(self, file_count: int, token_estimate: int) -> str:
         return (
-            f"Answering that would need the full content of {len(file_paths)} file(s) "
+            f"Answering that would need the full content of {file_count} file(s) "
             f"(~{token_estimate:,} tokens), which is too large to send in one request "
             f"(limit: {self.settings.wide_answer_max_tokens:,} tokens). Try asking about a "
             "specific file, section, or page instead."
@@ -397,6 +415,7 @@ class Pipeline:
             ],
             confidence=answer.confidence,
             model=self.settings.llm_model,
+            chart=answer.chart,
         )
 
     def query_trace(
@@ -418,7 +437,15 @@ class Pipeline:
 
             stage = "route"
             routed = self.router.route_to_files_scored(question, space_id, self.settings.top_files)
-            file_paths = [file_path for file_path, _ in routed]
+            file_paths = [file_path for file_path, _source_id, _score in routed]
+            # Only the top-scoring source(s), not every source with even one weak match —
+            # Qdrant sorts score-descending, so routed[0] is the best.
+            routed_source_ids: list[str] = []
+            if routed:
+                top_score = routed[0][2]
+                routed_source_ids = list(dict.fromkeys(
+                    source_id for _fp, source_id, score in routed if score == top_score
+                ))
             done("2/7 route", f"{len(routed)} files shortlisted")
 
             stage = "hybrid-search"
@@ -443,9 +470,20 @@ class Pipeline:
             final_chunk_traces: list[CompressedChunkTrace] = []
             final_chunks: list[CodeChunk] = []
             wide_fallback = False
+            wide_reason = ""
             too_large_message: str | None = None
             check()
-            if reranked_chunks:
+
+            # Three ways into the wide path, cheapest first — see BroadIntentClassifier's
+            # docstring for why the LLM tier only fires on the genuinely ambiguous case.
+            if not reranked_chunks:
+                wide_fallback, wide_reason = True, "no chunk answered this on its own"
+            elif matches_broad_keywords(question):
+                wide_fallback, wide_reason = True, "question language implies broad coverage"
+            elif self.intent_classifier.is_broad(question):
+                wide_fallback, wide_reason = True, "classified as a broad-coverage question"
+
+            if not wide_fallback:
                 logger.info("  [5/7 compress] %d chunks in one batched call", len(reranked_chunks))
                 compressed_chunks = self.compressor.compress_batch(question, reranked_chunks)
                 for chunk, compressed in zip(reranked_chunks, compressed_chunks):
@@ -464,19 +502,18 @@ class Pipeline:
                 # falls back to the whole reranked list when compression dropped everything
                 final_chunks = final_chunks or reranked_chunks
             else:
-                # No chunk answers this on its own — e.g. "summarize this" has no single
-                # matching passage. Try the routed file(s) whole instead of giving up: skip
-                # compression (there's nothing to trim to, we want everything) and gate only
-                # on total size, since sending it all is the point.
-                wide_fallback = True
-                wide_chunks = self._wide_fallback_chunks(space_id, file_paths)
+                # Skip compression — there's nothing to trim to, we want everything — and
+                # gate only on total size, since sending it all is the point.
+                wide_chunks = self._wide_fallback_chunks(space_id, routed_source_ids)
+                wide_file_count = len({c.file_path for c in wide_chunks})
                 token_estimate = (
                     sum(len(c.embeddable_text) for c in wide_chunks) // Tokenizer.CHARS_PER_TOKEN
                 )
                 if wide_chunks and token_estimate <= self.settings.wide_answer_max_tokens:
                     logger.info(
-                        "  [5/7 compress] rerank found nothing — sending %d whole file(s) "
-                        "(~%d tokens) instead", len(file_paths), token_estimate,
+                        "  [5/7 compress] going wide (%s) — sending %d source(s), "
+                        "%d whole file(s) (~%d tokens) instead",
+                        wide_reason, len(routed_source_ids), wide_file_count, token_estimate,
                     )
                     final_chunks = wide_chunks
                     final_chunk_traces = [
@@ -490,13 +527,16 @@ class Pipeline:
                     ]
                 elif wide_chunks:
                     logger.info(
-                        "  [5/7 compress] rerank found nothing and whole-file fallback "
-                        "(~%d tokens) exceeds the %d token budget — refusing",
-                        token_estimate, self.settings.wide_answer_max_tokens,
+                        "  [5/7 compress] going wide (%s) but whole-source fallback (~%d "
+                        "tokens) exceeds the %d token budget — refusing",
+                        wide_reason, token_estimate, self.settings.wide_answer_max_tokens,
                     )
-                    too_large_message = self._too_large_message(file_paths, token_estimate)
+                    too_large_message = self._too_large_message(wide_file_count, token_estimate)
                 else:
-                    logger.info("  [5/7 compress] rerank found nothing and no routed files to fall back to")
+                    logger.info(
+                        "  [5/7 compress] going wide (%s) but no routed sources to fall back to",
+                        wide_reason,
+                    )
 
             stage = "project"
             # Two PCA spaces for the vector-space visualization — see QueryTrace's field
@@ -549,7 +589,7 @@ class Pipeline:
             question=question,
             space_id=space_id,
             query_embedding=vector_preview(query_vector),
-            routed_files=[RoutedFile(file_path=fp, score=score) for fp, score in routed],
+            routed_files=[RoutedFile(file_path=fp, score=score) for fp, _source_id, score in routed],
             candidates=[
                 ScoredChunkTrace(
                     chunk=sc.chunk,
@@ -566,6 +606,7 @@ class Pipeline:
             final_chunks=final_chunk_traces,
             rerank_min_top_score=self.settings.rerank_min_top_score,
             wide_fallback=wide_fallback,
+            wide_fallback_reason=wide_reason,
             system_prompt=SYSTEM_PROMPT,
             final_prompt=self.answer_generator.build_prompt(raw_question or question, final_chunks),
             answer=answer_trace,

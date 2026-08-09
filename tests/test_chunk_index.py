@@ -40,6 +40,27 @@ def test_fetch_by_files_with_empty_list_returns_whole_space() -> None:
     assert all(vector for _, vector in candidates)
 
 
+def test_fetch_by_sources_returns_every_chunk_for_the_given_sources() -> None:
+    index = ChunkIndex(VectorStore(":memory:"))
+    index.ensure(dim=2)
+    a, b, c = _chunk("a.py"), _chunk("b.py"), _chunk("c.py")
+    b.source_id = "src2"
+    c.source_id = "src3"
+    index.upsert([a, b, c], [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+
+    results = index.fetch_by_sources("demo", ["src1", "src2"])
+
+    assert {chunk.file_path for chunk in results} == {"a.py", "b.py"}
+
+
+def test_fetch_by_sources_with_empty_list_returns_nothing() -> None:
+    index = ChunkIndex(VectorStore(":memory:"))
+    index.ensure(dim=2)
+    index.upsert([_chunk("a.py")], [[1.0, 0.0]])
+
+    assert index.fetch_by_sources("demo", []) == []
+
+
 def test_delete_source_removes_only_that_sources_chunks() -> None:
     index = ChunkIndex(VectorStore(":memory:"))
     index.ensure(dim=2)
