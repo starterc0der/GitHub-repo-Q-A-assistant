@@ -40,13 +40,23 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
+    healthcheck:
+      # No curl/wget in the slim image — Python's stdlib is always there. /health only
+      # answers once uvicorn is actually accepting connections, which FastAPI's lifespan
+      # protocol delays until model preload finishes (see PRELOAD_MODELS in main.py) —
+      # so this healthcheck failing IS the container still starting up, not broken.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
 
   frontend:
     build: ./frontend
     ports:
       - "5183:5183"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   hf_cache:

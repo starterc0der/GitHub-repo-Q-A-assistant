@@ -4,6 +4,19 @@ export function cls(...parts) {
   return parts.filter(Boolean).join(" ");
 }
 
+export const AVATAR_BG = { accent: "var(--accent-soft)", accent2: "var(--accent2-soft)", warn: "var(--warn-soft)", doc: "var(--doc-soft)" };
+export const AVATAR_INK = { accent: "var(--accent-ink)", accent2: "var(--accent2-ink)", warn: "var(--warn-ink)", doc: "var(--doc-ink)" };
+
+export function timeAgo(iso) {
+  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export function RagTag({ children, tone }) {
   return <span className={cls("rag-tag", tone && `rag-tag--${tone}`)}>{children}</span>;
 }

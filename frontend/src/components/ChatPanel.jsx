@@ -92,7 +92,7 @@ function MessageBubble({ message, onViewTrace }) {
   );
 }
 
-export function ChatPanel({ spaceId }) {
+export function useChatController(spaceId) {
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -182,64 +182,73 @@ export function ChatPanel({ spaceId }) {
     setTrace(await messageTrace(messageId));
   }
 
-  return (
-    <div className="rag-chat">
-      <aside className="rag-chat__sidebar">
-        <button className="rag-btn" onClick={handleNewChat}>
-          + New chat
-        </button>
-        <div className="rag-chat__list">
-          {chats.map((c) => (
-            <div
-              key={c.id}
-              className={cls("rag-chat__item", c.id === activeChatId && "rag-chat__item--active")}
-              onClick={() => setActiveChatId(c.id)}
-            >
-              <span className="rag-chat__item-title">{c.title}</span>
-              <button
-                className="rag-icon-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleDeleteChat(c.id);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      </aside>
+  return {
+    chats, activeChatId, setActiveChatId, messages, input, setInput, sending, error, trace, setTrace,
+    scrollRef, handleNewChat, handleDeleteChat, handleSend, handleStop, handleViewTrace,
+  };
+}
 
-      <div className="rag-chat__main">
-        <div className="rag-chat__messages-viewport" ref={scrollRef}>
-          <div className="rag-chat__messages">
-            {messages.length === 0 && <p className="rag-hint">Ask a question about this space's sources.</p>}
-            {messages.map((m) => (
-              <MessageBubble key={m.id} message={m} onViewTrace={handleViewTrace} />
-            ))}
-            {sending && <div className="rag-bubble rag-bubble--assistant rag-bubble--thinking">Thinking…</div>}
+export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewChat, handleDeleteChat }) {
+  return (
+    <>
+      <button className="rag-chat__new-btn" onClick={handleNewChat}>
+        <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> New chat
+      </button>
+      <div className="rag-chat__list">
+        {chats.map((c) => (
+          <div
+            key={c.id}
+            className={cls("rag-chat__item", c.id === activeChatId && "rag-chat__item--active")}
+            onClick={() => setActiveChatId(c.id)}
+          >
+            <span className="rag-chat__item-title">{c.title}</span>
+            <button
+              className="rag-icon-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteChat(c.id);
+              }}
+            >
+              ×
+            </button>
           </div>
-        </div>
-        {error && <p className="rag-error">{error}</p>}
-        <form className="rag-chat__composer" onSubmit={handleSend}>
-          <input
-            className="rag-input"
-            placeholder="Ask a question…"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={sending}
-          />
-          {sending ? (
-            <button className="rag-btn rag-btn--ghost" type="button" onClick={handleStop}>
-              Stop
-            </button>
-          ) : (
-            <button className="rag-btn" type="submit" disabled={!input.trim()}>
-              Send
-            </button>
-          )}
-        </form>
+        ))}
       </div>
+    </>
+  );
+}
+
+export function ChatMain({ messages, sending, error, input, setInput, handleSend, handleStop, handleViewTrace, scrollRef, trace, setTrace }) {
+  return (
+    <div className="rag-chat__main">
+      <div className="rag-chat__messages-viewport" ref={scrollRef}>
+        <div className="rag-chat__messages">
+          {messages.length === 0 && <p className="rag-hint">Ask a question about this space's sources.</p>}
+          {messages.map((m) => (
+            <MessageBubble key={m.id} message={m} onViewTrace={handleViewTrace} />
+          ))}
+          {sending && <div className="rag-bubble rag-bubble--assistant rag-bubble--thinking">Thinking…</div>}
+        </div>
+      </div>
+      {error && <p className="rag-error">{error}</p>}
+      <form className="rag-chat__composer" onSubmit={handleSend}>
+        <input
+          className="rag-input"
+          placeholder="Ask a question…"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          disabled={sending}
+        />
+        {sending ? (
+          <button className="rag-btn rag-btn--ghost" type="button" onClick={handleStop}>
+            Stop
+          </button>
+        ) : (
+          <button className="rag-btn" type="submit" disabled={!input.trim()}>
+            Send
+          </button>
+        )}
+      </form>
 
       {trace && (
         <PipelineOverlay mode="query" data={trace} title={trace.question} onClose={() => setTrace(null)} />

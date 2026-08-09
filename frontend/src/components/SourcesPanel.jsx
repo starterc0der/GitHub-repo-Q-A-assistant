@@ -1,12 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import { createSource, deleteSource, sourceIngestStream, sourceTrace, uploadSource } from "../api.js";
-import { cls } from "./RagAtoms.jsx";
+import { cls, timeAgo } from "./RagAtoms.jsx";
 import { PipelineOverlay } from "./PipelineOverlay.jsx";
 
 const KIND_LABEL = { repo: "REPO", pdf: "PDF", docx: "DOC", text: "TXT", csv: "CSV" };
+const KIND_TAG_CLASS = { repo: "rag-tag--accent", pdf: "rag-tag--warn", docx: "rag-tag--doc" };
+const STATUS_LABEL = { ready: "Ready", ingesting: "Ingesting", failed: "Failed", pending: "Pending" };
+const FILTERS = [
+  { key: "all", label: "All sources" },
+  { key: "repo", label: "Repos" },
+  { key: "pdf", label: "PDFs" },
+  { key: "docx", label: "Docs" },
+  { key: "csv", label: "CSV" },
+  { key: "text", label: "Text" },
+];
 
 function SourceBadge({ kind }) {
-  return <span className="rag-tag rag-tag--neutral">{KIND_LABEL[kind] || kind.toUpperCase()}</span>;
+  return (
+    <span className={`rag-tag ${KIND_TAG_CLASS[kind] || "rag-tag--neutral"}`}>
+      {KIND_LABEL[kind] || kind.toUpperCase()}
+    </span>
+  );
+}
+
+function StatusPill({ status }) {
+  return <span className={`rag-status-pill rag-status-pill--${status}`}>{STATUS_LABEL[status] || status}</span>;
 }
 
 const RING_R = 9;
@@ -58,75 +76,38 @@ function useIngestProgress(source, onSettled) {
   return progress;
 }
 
-function SourceRow({ source, onRefresh, onDelete }) {
+function SourceRow({ source, onRefresh, onOpenDetail }) {
   const progress = useIngestProgress(source, onRefresh);
-  const [breakdown, setBreakdown] = useState(null);
-  const [loadingBreakdown, setLoadingBreakdown] = useState(false);
-
-  async function openBreakdown() {
-    setLoadingBreakdown(true);
-    try {
-      setBreakdown(await sourceTrace(source.id));
-    } catch (err) {
-      alert(err.message);
-    } finally {
-      setLoadingBreakdown(false);
-    }
-  }
-
   return (
-    <div className="rag-source-row">
+    <div className="rag-source-row rag-source-row--clickable" onClick={() => onOpenDetail(source.id)}>
       <div className="rag-source-row__main">
         <SourceBadge kind={source.kind} />
         <span className="rag-source-row__name">{source.name}</span>
-        {source.status === "ready" && (
-          <span className="rag-dim rag-source-row__stat">
-            {source.file_count} files · {source.chunk_count} chunks
-          </span>
-        )}
+        <span className="rag-source-row__added">{timeAgo(source.created_at)}</span>
         {source.status === "ingesting" && (
           <>
             <IngestRing progress={progress || { message: "Ingesting…", files_done: 0, files_total: 0 }} />
             <span className="rag-dim rag-source-row__stat">{progress?.message || "Ingesting…"}</span>
           </>
         )}
-        {source.status === "failed" && <span className="rag-error">{source.error}</span>}
       </div>
-      <div className="rag-source-row__actions">
-        {source.has_trace && (
-          <button className="rag-btn rag-btn--ghost" onClick={openBreakdown} disabled={loadingBreakdown}>
-            {loadingBreakdown ? "Loading…" : "View ingestion breakdown"}
-          </button>
-        )}
-        <button className="rag-icon-btn" title="Delete source" onClick={() => onDelete(source.id)}>
-          ×
-        </button>
-      </div>
-      {breakdown && (
-        <PipelineOverlay mode="ingest" data={breakdown} title={source.name} onClose={() => setBreakdown(null)} />
-      )}
+      <StatusPill status={source.status} />
     </div>
   );
 }
 
-function AddSourceForm({ spaceId, onAdded }) {
-  const [mode, setMode] = useState(null); // null | "repo" | "text" | "file"
+function RepoModal({ spaceId, onClose, onAdded }) {
   const [url, setUrl] = useState("");
-  const [text, setText] = useState("");
-  const [textName, setTextName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const fileRef = useRef(null);
 
-  async function submitRepo(e) {
+  async function submit(e) {
     e.preventDefault();
     if (!url.trim()) return;
     setBusy(true);
     setError(null);
     try {
       await createSource(spaceId, { kind: "repo", uri: url.trim() });
-      setUrl("");
-      setMode(null);
       onAdded();
     } catch (err) {
       setError(err.message);
@@ -135,16 +116,46 @@ function AddSourceForm({ spaceId, onAdded }) {
     }
   }
 
-  async function submitText(e) {
+  return (
+    <div className="rag-modal-backdrop" onClick={onClose}>
+      <form className="rag-modal-card" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <h2>Connect GitHub repo</h2>
+        <label className="rag-input-card__label">Repository URL</label>
+        <input
+          className="rag-input"
+          placeholder="https://github.com/owner/repo"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          disabled={busy}
+          autoFocus
+        />
+        {error && <p className="rag-error">{error}</p>}
+        <div className="rag-modal-card__actions">
+          <button type="button" className="rag-btn rag-btn--ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="rag-btn" disabled={busy || !url.trim()}>
+            {busy ? "Adding…" : "Add"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function TextModal({ spaceId, onClose, onAdded }) {
+  const [name, setName] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
     e.preventDefault();
     if (!text.trim()) return;
     setBusy(true);
     setError(null);
     try {
-      await createSource(spaceId, { kind: "text", name: textName.trim() || undefined, text });
-      setText("");
-      setTextName("");
-      setMode(null);
+      await createSource(spaceId, { kind: "text", name: name.trim() || undefined, text });
       onAdded();
     } catch (err) {
       setError(err.message);
@@ -152,6 +163,101 @@ function AddSourceForm({ spaceId, onAdded }) {
       setBusy(false);
     }
   }
+
+  return (
+    <div className="rag-modal-backdrop" onClick={onClose}>
+      <form className="rag-modal-card" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <h2>Paste text</h2>
+        <label className="rag-input-card__label">Name (optional)</label>
+        <input className="rag-input" value={name} onChange={(e) => setName(e.target.value)} disabled={busy} autoFocus />
+        <label className="rag-input-card__label">Text</label>
+        <textarea
+          className="rag-input rag-textarea"
+          placeholder="Paste text to index…"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          disabled={busy}
+          rows={8}
+        />
+        {error && <p className="rag-error">{error}</p>}
+        <div className="rag-modal-card__actions">
+          <button type="button" className="rag-btn rag-btn--ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="rag-btn" disabled={busy || !text.trim()}>
+            {busy ? "Adding…" : "Add"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function SourceDetailModal({ source, onClose, onDelete, onViewBreakdown }) {
+  return (
+    <div className="rag-modal-backdrop" onClick={onClose}>
+      <div className="rag-modal-card" onClick={(e) => e.stopPropagation()}>
+        <h2>{source.name}</h2>
+        <div className="rag-source-detail__row">
+          <span className="rag-source-detail__k">Type</span>
+          <SourceBadge kind={source.kind} />
+        </div>
+        <div className="rag-source-detail__row">
+          <span className="rag-source-detail__k">Added</span>
+          <span className="rag-dim">{new Date(source.created_at).toLocaleString()}</span>
+        </div>
+        <div className="rag-source-detail__row">
+          <span className="rag-source-detail__k">Status</span>
+          <StatusPill status={source.status} />
+        </div>
+        {source.status === "ready" && (
+          <div className="rag-source-detail__row">
+            <span className="rag-source-detail__k">Indexed</span>
+            <span className="rag-dim">
+              {source.file_count} files · {source.chunk_count} chunks
+            </span>
+          </div>
+        )}
+        {source.status === "failed" && (
+          <div className="rag-source-detail__row">
+            <span className="rag-source-detail__k">Error</span>
+            <span className="rag-error">{source.error}</span>
+          </div>
+        )}
+        <div className="rag-modal-card__actions">
+          <button type="button" className="rag-btn rag-btn--ghost" style={{ color: "var(--warn-ink)" }} onClick={() => onDelete(source.id)}>
+            Remove source
+          </button>
+          {source.has_trace && (
+            <button type="button" className="rag-btn rag-btn--ghost" onClick={onViewBreakdown}>
+              View ingestion breakdown
+            </button>
+          )}
+          <button type="button" className="rag-btn" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function useSourcesController(spaceId, sources, onRefresh) {
+  const [filter, setFilter] = useState("all");
+  const [modal, setModal] = useState(null); // null | "repo" | "text"
+  const [detailId, setDetailId] = useState(null);
+  const [breakdown, setBreakdown] = useState(null);
+  const [loadingBreakdown, setLoadingBreakdown] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
+  const fileRef = useRef(null);
+
+  const detailSource = sources.find((s) => s.id === detailId) || null;
+  const counts = sources.reduce((acc, s) => {
+    acc[s.kind] = (acc[s.kind] || 0) + 1;
+    return acc;
+  }, {});
+  const filtered = filter === "all" ? sources : sources.filter((s) => s.kind === filter);
 
   async function handleFile(e) {
     const file = e.target.files?.[0];
@@ -160,99 +266,130 @@ function AddSourceForm({ spaceId, onAdded }) {
     const ext = file.name.split(".").pop().toLowerCase();
     const kind = { pdf: "pdf", docx: "docx", csv: "csv" }[ext];
     if (!kind) {
-      setError("Only .pdf, .docx, and .csv files are supported.");
+      setUploadError("Only .pdf, .docx, and .csv files are supported.");
       return;
     }
-    setBusy(true);
-    setError(null);
+    setUploading(true);
+    setUploadError(null);
     try {
       await uploadSource(spaceId, kind, file);
-      onAdded();
+      onRefresh();
     } catch (err) {
-      setError(err.message);
+      setUploadError(err.message);
     } finally {
-      setBusy(false);
+      setUploading(false);
     }
   }
 
-  return (
-    <div className="rag-add-source">
-      <div className="rag-add-source__buttons">
-        <button className="rag-btn rag-btn--ghost" onClick={() => setMode(mode === "repo" ? null : "repo")}>
-          Connect GitHub repo
-        </button>
-        <button className="rag-btn rag-btn--ghost" onClick={() => fileRef.current?.click()} disabled={busy}>
-          Upload PDF/Doc/CSV
-        </button>
-        <input ref={fileRef} type="file" accept=".pdf,.docx,.csv" hidden onChange={handleFile} />
-        <button className="rag-btn rag-btn--ghost" onClick={() => setMode(mode === "text" ? null : "text")}>
-          Paste text
-        </button>
-      </div>
-
-      {mode === "repo" && (
-        <form className="rag-add-source__form" onSubmit={submitRepo}>
-          <input
-            className="rag-input"
-            placeholder="https://github.com/owner/repo"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            disabled={busy}
-            autoFocus
-          />
-          <button className="rag-btn" type="submit" disabled={busy}>
-            {busy ? "Adding…" : "Add"}
-          </button>
-        </form>
-      )}
-
-      {mode === "text" && (
-        <form className="rag-add-source__form rag-add-source__form--stacked" onSubmit={submitText}>
-          <input
-            className="rag-input"
-            placeholder="Name (optional)"
-            value={textName}
-            onChange={(e) => setTextName(e.target.value)}
-            disabled={busy}
-          />
-          <textarea
-            className="rag-input rag-textarea"
-            placeholder="Paste text to index…"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            disabled={busy}
-            rows={5}
-          />
-          <button className="rag-btn" type="submit" disabled={busy}>
-            {busy ? "Adding…" : "Add"}
-          </button>
-        </form>
-      )}
-
-      {busy && mode === null && <p className="rag-hint">Uploading…</p>}
-      {error && <p className="rag-error">{error}</p>}
-    </div>
-  );
-}
-
-export function SourcesPanel({ spaceId, sources, onRefresh }) {
   async function handleDelete(sourceId) {
     if (!confirm("Delete this source? This removes its indexed data too.")) return;
     await deleteSource(sourceId);
+    setDetailId(null);
     onRefresh();
   }
 
+  async function openBreakdown() {
+    const source = detailSource;
+    setDetailId(null);
+    setLoadingBreakdown(true);
+    try {
+      setBreakdown({ trace: await sourceTrace(source.id), name: source.name });
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setLoadingBreakdown(false);
+    }
+  }
+
+  return {
+    filter, setFilter, modal, setModal, detailSource, setDetailId, breakdown, setBreakdown, loadingBreakdown,
+    uploading, uploadError, fileRef, handleFile, handleDelete, openBreakdown, counts, filtered, sources, spaceId, onRefresh,
+  };
+}
+
+export function SourcesSidebar({ filter, setFilter, counts, sources }) {
   return (
-    <div className="rag-sources-panel">
-      <AddSourceForm spaceId={spaceId} onAdded={onRefresh} />
-      {sources.length === 0 ? (
-        <p className="rag-hint">No sources yet — connect a repo, upload a file, or paste text above.</p>
-      ) : (
-        <div className="rag-source-list">
-          {sources.map((s) => (
-            <SourceRow key={s.id} source={s} onRefresh={onRefresh} onDelete={handleDelete} />
-          ))}
+    <>
+      <div className="rag-sources__sidebar-label">Filter</div>
+      {FILTERS.map((f) => (
+        <button
+          key={f.key}
+          className={cls("rag-sources__filter", filter === f.key && "rag-sources__filter--active")}
+          onClick={() => setFilter(f.key)}
+        >
+          <span>{f.label}</span>
+          <span className="rag-sources__filter-count">{f.key === "all" ? sources.length : counts[f.key] || 0}</span>
+        </button>
+      ))}
+    </>
+  );
+}
+
+export function SourcesMain({
+  spaceId, sources, filtered, modal, setModal, detailSource, setDetailId, breakdown, setBreakdown,
+  loadingBreakdown, uploading, uploadError, fileRef, handleFile, handleDelete, openBreakdown, onRefresh,
+}) {
+  return (
+    <div className="rag-sources__main">
+      <div className="rag-sources__container">
+        <div className="rag-sources__header">
+          <div>
+            <h2>Sources</h2>
+            <p>
+              {filtered.length} of {sources.length} source{sources.length === 1 ? "" : "s"}
+            </p>
+          </div>
+          <div className="rag-sources__actions">
+            <button className="rag-btn rag-btn--ghost" onClick={() => setModal("repo")}>
+              Connect GitHub repo
+            </button>
+            <button className="rag-btn rag-btn--ghost" onClick={() => fileRef.current?.click()} disabled={uploading}>
+              {uploading ? "Uploading…" : "Upload PDF/Doc/CSV"}
+            </button>
+            <input ref={fileRef} type="file" accept=".pdf,.docx,.csv" hidden onChange={handleFile} />
+            <button className="rag-btn" onClick={() => setModal("text")}>
+              Paste text
+            </button>
+          </div>
         </div>
+        {uploadError && <p className="rag-error">{uploadError}</p>}
+
+        {filtered.length === 0 ? (
+          <p className="rag-hint">
+            {sources.length === 0
+              ? "No sources yet — connect a repo, upload a file, or paste text above."
+              : "No sources match this filter."}
+          </p>
+        ) : (
+          <div className="rag-source-list">
+            {filtered.map((s) => (
+              <SourceRow key={s.id} source={s} onRefresh={onRefresh} onOpenDetail={setDetailId} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {modal === "repo" && (
+        <RepoModal spaceId={spaceId} onClose={() => setModal(null)} onAdded={() => { setModal(null); onRefresh(); }} />
+      )}
+      {modal === "text" && (
+        <TextModal spaceId={spaceId} onClose={() => setModal(null)} onAdded={() => { setModal(null); onRefresh(); }} />
+      )}
+      {detailSource && (
+        <SourceDetailModal
+          source={detailSource}
+          onClose={() => setDetailId(null)}
+          onDelete={handleDelete}
+          onViewBreakdown={openBreakdown}
+        />
+      )}
+      {loadingBreakdown && (
+        <p className="rag-hint" style={{ position: "fixed", top: 16, right: 16 }}>
+          Loading…
+        </p>
+      )}
+      {breakdown && (
+        <PipelineOverlay mode="ingest" data={breakdown.trace} title={breakdown.name} onClose={() => setBreakdown(null)} />
       )}
     </div>
   );

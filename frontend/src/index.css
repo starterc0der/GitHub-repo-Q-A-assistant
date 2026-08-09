@@ -8,21 +8,38 @@
   --border: oklch(90% 0.006 95);
   --border-strong: oklch(84% 0.008 95);
 
-  --accent: oklch(58% 0.16 252);
-  --accent-ink: oklch(30% 0.14 252);
-  --accent-soft: oklch(94% 0.03 252);
-  --accent-border: oklch(80% 0.06 252);
+  --accent: oklch(62% 0.17 18);
+  --accent-ink: oklch(40% 0.15 18);
+  --accent-soft: oklch(93% 0.04 18);
+  --accent-border: oklch(81% 0.07 18);
 
   --accent2: oklch(60% 0.13 165);
   --accent2-ink: oklch(32% 0.1 165);
   --accent2-soft: oklch(94% 0.035 165);
   --accent2-border: oklch(80% 0.06 165);
 
-  --warn: oklch(62% 0.16 40);
-  --warn-soft: oklch(94% 0.04 40);
-  --warn-border: oklch(80% 0.07 40);
+  --doc: oklch(58% 0.14 235);
+  --doc-ink: oklch(35% 0.12 235);
+  --doc-soft: oklch(94% 0.03 235);
+  --doc-border: oklch(80% 0.07 235);
+
+  --warn: oklch(68% 0.15 70);
+  --warn-ink: oklch(40% 0.12 70);
+  --warn-soft: oklch(95% 0.05 70);
+  --warn-border: oklch(84% 0.09 70);
 
   --code-bg: oklch(97% 0.012 90);
+
+  /* Dark sidebar surface — a warm charcoal "island" within the otherwise light app,
+     matching the space chat sidebar in the updated design. */
+  --sidebar-bg: oklch(29% 0.015 60);
+  --sidebar-border: oklch(36% 0.015 60);
+  --sidebar-btn-bg: oklch(33% 0.018 60);
+  --sidebar-btn-border: oklch(41% 0.015 60);
+  --sidebar-ink: oklch(90% 0.01 290);
+  --sidebar-ink-dim: oklch(58% 0.02 290);
+  --sidebar-ink-faint: oklch(45% 0.02 290);
+  --sidebar-active: oklch(46% 0.17 18);
 
   --sans: "Public Sans", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;

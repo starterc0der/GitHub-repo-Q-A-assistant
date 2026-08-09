@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { getSpace } from "../api.js";
-import { cls } from "../components/RagAtoms.jsx";
-import { ChatPanel } from "../components/ChatPanel.jsx";
-import { SourcesPanel } from "../components/SourcesPanel.jsx";
+import { AVATAR_BG, AVATAR_INK, cls } from "../components/RagAtoms.jsx";
+import { ChatMain, ChatSidebar, useChatController } from "../components/ChatPanel.jsx";
+import { SourcesMain, SourcesSidebar, useSourcesController } from "../components/SourcesPanel.jsx";
 
 export function SpaceView({ spaceId, onBack }) {
   const [space, setSpace] = useState(null);
@@ -17,6 +17,9 @@ export function SpaceView({ spaceId, onBack }) {
   }
 
   useEffect(refresh, [spaceId]);
+
+  const chat = useChatController(spaceId);
+  const sourcesCtl = useSourcesController(spaceId, space?.sources || [], refresh);
 
   if (error) {
     return (
@@ -40,36 +43,44 @@ export function SpaceView({ spaceId, onBack }) {
 
   return (
     <div className="rag-space">
-      <header className="rag-header">
-        <button className="rag-back-btn" onClick={onBack}>
-          ← Spaces
-        </button>
-        <div className="rag-brand">
-          <span className={`rag-dot rag-dot--${space.color}`} />
-          <div>
-            <h1>{space.name}</h1>
-            {space.description && <p>{space.description}</p>}
+      <aside className="rag-space-sidebar">
+        <div className="rag-space-sidebar__head">
+          <button className="rag-space-sidebar__back" onClick={onBack}>
+            ← Spaces
+          </button>
+          <div className="rag-space-sidebar__info">
+            <span
+              className="rag-avatar rag-avatar--sm"
+              style={{ background: AVATAR_BG[space.color] || AVATAR_BG.accent, color: AVATAR_INK[space.color] || AVATAR_INK.accent }}
+            >
+              {space.name.trim().charAt(0).toUpperCase() || "?"}
+            </span>
+            <div>
+              <div className="rag-space-sidebar__info-name">{space.name}</div>
+              <div className="rag-space-sidebar__info-count">
+                {space.sources.length} source{space.sources.length === 1 ? "" : "s"}
+              </div>
+            </div>
+          </div>
+          <div className="rag-space-sidebar__tabs">
+            <button className={cls("rag-space-sidebar__tab", tab === "chat" && "rag-space-sidebar__tab--active")} onClick={() => setTab("chat")}>
+              Chat
+            </button>
+            <button
+              className={cls("rag-space-sidebar__tab", tab === "sources" && "rag-space-sidebar__tab--active")}
+              onClick={() => setTab("sources")}
+            >
+              Sources ({space.sources.length})
+            </button>
           </div>
         </div>
-        <div className="rag-tabs">
-          <button className={cls("rag-tabs__btn", tab === "chat" && "rag-tabs__btn--active")} onClick={() => setTab("chat")}>
-            Chat
-          </button>
-          <button
-            className={cls("rag-tabs__btn", tab === "sources" && "rag-tabs__btn--active")}
-            onClick={() => setTab("sources")}
-          >
-            Sources ({space.sources.length})
-          </button>
+        <div className="rag-space-sidebar__content">
+          {tab === "chat" ? <ChatSidebar {...chat} /> : <SourcesSidebar {...sourcesCtl} />}
         </div>
-      </header>
+      </aside>
 
-      <div className="rag-space__body">
-        {tab === "chat" ? (
-          <ChatPanel spaceId={spaceId} />
-        ) : (
-          <SourcesPanel spaceId={spaceId} sources={space.sources} onRefresh={refresh} />
-        )}
+      <div className="rag-space__main">
+        {tab === "chat" ? <ChatMain {...chat} /> : <SourcesMain {...sourcesCtl} />}
       </div>
     </div>
   );
