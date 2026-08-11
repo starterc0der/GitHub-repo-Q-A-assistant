@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { createChat, deleteChat, listChats, listMessages, messageTrace, sendMessage } from "../api.js";
+import { createChat, deleteChat, listChats, listMessages, messageTrace, messageVectors, sendMessage } from "../api.js";
 import { cls, ConfirmDialog } from "./RagAtoms.jsx";
 import { BarChart } from "./BarChart.jsx";
 import { PipelineOverlay } from "./PipelineOverlay.jsx";
@@ -83,8 +83,9 @@ function MessageText({ text }) {
   return <>{blocks}</>;
 }
 
-function MessageBubble({ message, onViewTrace }) {
+function MessageBubble({ message, onViewTrace, loadingTraceId }) {
   const isUser = message.role === "user";
+  const loading = loadingTraceId === message.id;
   return (
     <div className={cls("rag-bubble", isUser ? "rag-bubble--user" : "rag-bubble--assistant")}>
       <MessageText text={message.content} />
@@ -93,8 +94,8 @@ function MessageBubble({ message, onViewTrace }) {
         <div className="rag-bubble__foot">
           {message.cache_hit ? <span className="rag-tag rag-tag--accent2">served from cache</span> : null}
           {message.has_trace ? (
-            <button className="rag-link-btn" onClick={() => onViewTrace(message.id)}>
-              View pipeline breakdown
+            <button className="rag-link-btn" disabled={loading} onClick={() => onViewTrace(message.id)}>
+              {loading ? "Loading…" : "View pipeline breakdown"}
             </button>
           ) : null}
         </div>
@@ -111,6 +112,7 @@ export function useChatController(spaceId) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
   const [trace, setTrace] = useState(null);
+  const [loadingTraceId, setLoadingTraceId] = useState(null);
   const [deleteChatId, setDeleteChatId] = useState(null);
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
@@ -192,12 +194,21 @@ export function useChatController(spaceId) {
   }
 
   async function handleViewTrace(messageId) {
-    setTrace(await messageTrace(messageId));
+    setLoadingTraceId(messageId);
+    try {
+      const t = await messageTrace(messageId);
+      // No vector-space data for a conversation-only (meta) answer — nothing to fetch.
+      if (!t.meta) Object.assign(t, await messageVectors(messageId));
+      setTrace(t);
+    } finally {
+      setLoadingTraceId(null);
+    }
   }
 
   return {
     chats, activeChatId, setActiveChatId, messages, input, setInput, sending, error, trace, setTrace,
-    scrollRef, handleNewChat, deleteChatId, setDeleteChatId, confirmDeleteChat, handleSend, handleStop, handleViewTrace,
+    loadingTraceId, scrollRef, handleNewChat, deleteChatId, setDeleteChatId, confirmDeleteChat,
+    handleSend, handleStop, handleViewTrace,
   };
 }
 
@@ -270,14 +281,14 @@ function MetaTraceModal({ data, onClose }) {
   );
 }
 
-export function ChatMain({ messages, sending, error, input, setInput, handleSend, handleStop, handleViewTrace, scrollRef, trace, setTrace }) {
+export function ChatMain({ messages, sending, error, input, setInput, handleSend, handleStop, handleViewTrace, loadingTraceId, scrollRef, trace, setTrace }) {
   return (
     <div className="rag-chat__main">
       <div className="rag-chat__messages-viewport" ref={scrollRef}>
         <div className="rag-chat__messages">
           {messages.length === 0 && <p className="rag-hint">Ask a question about this space's sources.</p>}
           {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} onViewTrace={handleViewTrace} />
+            <MessageBubble key={m.id} message={m} onViewTrace={handleViewTrace} loadingTraceId={loadingTraceId} />
           ))}
           {sending && <div className="rag-bubble rag-bubble--assistant rag-bubble--thinking">Thinking…</div>}
         </div>

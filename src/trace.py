@@ -168,18 +168,33 @@ class QueryTrace:
     final_chunks: list[CompressedChunkTrace] = field(default_factory=list)
     system_prompt: str = ""
     final_prompt: str = ""
+    # The generate call actually receives system_prompt, THEN these turns, THEN
+    # final_prompt as the real chat messages (see LLMClient.complete) — not folded into
+    # final_prompt's text. Surfaced separately so "final prompt, verbatim" is actually
+    # verbatim. Empty on turn 1, where there's no history to send.
+    history: list[dict] = field(default_factory=list)
     answer: AnswerTrace | None = None
     # Surfaced so the UI can say *why* a stage is empty rather than showing a blank list.
     rerank_min_top_score: float = 0.0
     # Whole source(s) sent instead of the rerank-scored top-k; reason is the human-readable why.
     wide_fallback: bool = False
     wide_fallback_reason: str = ""
-    # Two PCA spaces for the vector-space visualization: file-summary embeddings (all
-    # files in the repo, for the routing stages) and whole-repo chunk embeddings (every
-    # chunk, not just the routed-file pool — shared with the hybrid/rerank/compress plots
-    # and the "whole vector space" modal, so the query lands in the same spot everywhere
-    # a chunk-level plot is shown). The query is projected separately into each space, so
-    # its position differs between the file-summary view and the chunk-level views.
+
+
+@dataclass
+class VectorsTrace:
+    """The vector-space visualization data — split out from QueryTrace because it's a
+    full-space PCA over every file/chunk embedding, expensive relative to the rest of a
+    query, and only needed if the user opens the pipeline-breakdown UI. Computed on
+    demand by Pipeline.vectors_trace() instead of eagerly on every message send.
+
+    Two PCA spaces: file-summary embeddings (all files in the repo, for the routing
+    stages) and whole-repo chunk embeddings (every chunk, not just the routed-file pool —
+    shared with the hybrid/rerank/compress plots and the "whole vector space" modal, so
+    the query lands in the same spot everywhere a chunk-level plot is shown). The query is
+    projected separately into each space, so its position differs between the two.
+    """
+
     query_file_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     file_xyz: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     # "{file_path} · {symbol_name or 'block'}" per chunk id — covers every chunk in the

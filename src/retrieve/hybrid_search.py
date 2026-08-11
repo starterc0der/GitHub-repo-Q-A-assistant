@@ -55,14 +55,18 @@ class HybridSearch:
         return [sc.chunk for sc in self.search_scored(question, space_id, file_paths, k)]
 
     def search_scored(
-        self, question: str, space_id: str, file_paths: list[str], k: int
+        self, question: str, space_id: str, file_paths: list[str], k: int,
+        query_vector: list[float] | None = None,
     ) -> list[ScoredChunk]:
+        """Pass query_vector when the caller already embedded the question, to avoid a
+        redundant embedding forward pass. question is still needed either way, for BM25."""
         candidates = self.chunk_index.fetch_by_files(space_id, file_paths)
         if not candidates:
             return []
         chunks, vectors = zip(*candidates)
 
-        dense_scores = self._cosine_scores(self.embedder.embed_one(question), vectors)
+        vector = query_vector if query_vector is not None else self.embedder.embed_one(question)
+        dense_scores = self._cosine_scores(vector, vectors)
         bm25 = BM25Okapi([chunk.code.split() for chunk in chunks])
         bm25_scores = list(bm25.get_scores(question.split()))
 

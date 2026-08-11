@@ -256,8 +256,8 @@ export function RetrievalSections({ data, visible }) {
           id="prompt"
           num="6"
           title="Final prompt"
-          description="Exactly what gets sent to the answer model — system prompt and user prompt, verbatim."
-          plain="Assemble everything above into the exact instructions — system prompt, trimmed matches, and your question — that get handed to the LLM to write the final answer. This is the real payload, shown character for character."
+          description="Exactly what gets sent to the answer model — system prompt, conversation history, and user prompt, verbatim."
+          plain="Assemble everything above into the exact instructions — system prompt, prior chat turns, trimmed matches, and your question — that get handed to the LLM to write the final answer. This is the real payload, shown character for character."
         >
           {/* pre, not p: the system prompt is a numbered rule list and its line breaks
               are meaningful — collapsing them makes it unreadable. */}
@@ -265,6 +265,21 @@ export function RetrievalSections({ data, visible }) {
           <div className="rag-prompt">
             <pre>{data.system_prompt}</pre>
           </div>
+          {data.history.length > 0 && (
+            <>
+              <p className="rag-hint">
+                Conversation history sent as real chat turns (not folded into the prompt text below):
+              </p>
+              <div className="rag-meta-trace">
+                {data.history.map((m, i) => (
+                  <div key={i} className={`rag-meta-trace__turn rag-meta-trace__turn--${m.role}`}>
+                    <span className="rag-meta-trace__role">{m.role}</span>
+                    <span className="rag-meta-trace__text">{m.content}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
           <div className="rag-stat-row">
             <div className="rag-stat rag-stat--accent">
               <span className="rag-stat__n">{data.final_chunks.length}</span>

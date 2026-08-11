@@ -81,6 +81,7 @@ export const createChat = (spaceId, title) => post(`/spaces/${spaceId}/chats`, {
 export const deleteChat = (id) => del(`/chats/${id}`);
 export const listMessages = (chatId) => request(`/chats/${chatId}/messages`);
 export const messageTrace = (id) => request(`/messages/${id}/trace`);
+export const messageVectors = (id) => request(`/messages/${id}/vectors`);
 
 // signal: an AbortController signal — aborting closes the fetch, which the backend
 // detects via request.is_disconnected() and uses to cancel in-flight LLM calls.

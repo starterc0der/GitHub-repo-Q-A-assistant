@@ -9,9 +9,12 @@ BROAD_INTENT_KEYWORDS = (
 )
 
 CLASSIFIER_SYSTEM_PROMPT = (
-    "Classify the question as asking about ONE specific thing (a fact, a single item, a "
-    "narrow lookup) or BROAD coverage across many items (comparing everything, summarizing "
-    "the whole dataset, every entry). Reply with exactly one word: SPECIFIC or BROAD."
+    "Classify the question as SPECIFIC (a fact, a single item, or a small NAMED/BOUNDED "
+    "set of items — e.g. \"Pandu's two other sons, Nakula and Sahadeva\" is still SPECIFIC, "
+    "not BROAD, because it names exactly who) or BROAD (asks for open-ended coverage with "
+    "no natural bound — every item, the whole dataset, comparing everything). Naming two or "
+    "three specific things is SPECIFIC; only classify BROAD when nothing bounds the scope. "
+    "Reply with exactly one word: SPECIFIC or BROAD."
 )
 
 

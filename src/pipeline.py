@@ -40,6 +40,7 @@ from src.trace import (
     RerankedChunkTrace,
     RoutedFile,
     ScoredChunkTrace,
+    VectorsTrace,
     WalkTrace,
     project_3d,
     vector_preview,
@@ -458,7 +459,9 @@ class Pipeline:
             done("1/7 embed", f"{len(query_vector)}d query vector")
 
             stage = "route"
-            routed = self.router.route_to_files_scored(question, space_id, self.settings.top_files)
+            routed = self.router.route_to_files_scored(
+                question, space_id, self.settings.top_files, query_vector=query_vector
+            )
             file_paths = [file_path for file_path, _source_id, _score in routed]
             # Only the top-scoring source(s), not every source with even one weak match —
             # Qdrant sorts score-descending, so routed[0] is the best.
@@ -472,7 +475,8 @@ class Pipeline:
 
             stage = "hybrid-search"
             scored_candidates = self.hybrid_search.search_scored(
-                question, space_id, file_paths, self.settings.hybrid_candidate_k
+                question, space_id, file_paths, self.settings.hybrid_candidate_k,
+                query_vector=query_vector,
             )
             candidate_chunks = [sc.chunk for sc in scored_candidates]
             done("3/7 hybrid", f"{len(candidate_chunks)} candidates")
@@ -560,36 +564,6 @@ class Pipeline:
                         wide_reason,
                     )
 
-            stage = "project"
-            # Two PCA spaces for the vector-space visualization — see QueryTrace's field
-            # comments for why they're separate.
-            all_file_vectors = self.doc_index.all_vectors(space_id)
-            file_xyz_all = project_3d([query_vector] + [v for _, v in all_file_vectors])
-            query_file_xyz, file_xyz_rest = file_xyz_all[0], file_xyz_all[1:]
-            file_xyz = {
-                summary.file_path: xyz
-                for (summary, _), xyz in zip(all_file_vectors, file_xyz_rest)
-            }
-
-            # Every chunk in the space, not just the routed-file pool — shared by the
-            # hybrid/rerank/compress plots and the "whole vector space" modal, so the
-            # query lands in the same spot in both instead of two differently-scoped
-            # projections.
-            whole_chunk_pool = self.chunk_index.fetch_by_files(space_id, [])
-            whole_chunk_xyz_all = project_3d([query_vector] + [v for _, v in whole_chunk_pool])
-            query_whole_chunk_xyz = whole_chunk_xyz_all[0]
-            whole_chunk_xyz_rest = whole_chunk_xyz_all[1:]
-            whole_chunk_xyz = {
-                chunk.id: xyz for (chunk, _), xyz in zip(whole_chunk_pool, whole_chunk_xyz_rest)
-            }
-            # Full CodeChunk objects (whole_chunk_pool) are already in memory here — reuse
-            # them for a cheap label per chunk rather than sending the whole chunk (code
-            # included) for every one of what can be hundreds of space-wide entries.
-            chunk_labels = {
-                chunk.id: f"{chunk.file_path} · {chunk.symbol_name or 'block'}"
-                for chunk, _ in whole_chunk_pool
-            }
-
             done("6/7 prompt", f"{len(final_chunks)} chunks in the final prompt")
             stage = "answer"
         except Cancelled:
@@ -631,7 +605,43 @@ class Pipeline:
             wide_fallback_reason=wide_reason,
             system_prompt=SYSTEM_PROMPT,
             final_prompt=self.answer_generator.build_prompt(raw_question or question, final_chunks),
+            history=[{"role": role, "content": content} for role, content in (history or [])],
             answer=answer_trace,
+        )
+
+    def vectors_trace(self, question: str, space_id: str) -> VectorsTrace:
+        """On-demand PCA projection for the vector-space UI — split out of query_trace()
+        because it's two full-space scrolls + two SVDs that only matter if the user opens
+        the pipeline-breakdown view, not something every message should pay for.
+
+        `question` should be the same (standalone) question query_trace() embedded —
+        embedding is deterministic, so re-embedding it here reproduces the same
+        query_vector used at answer time."""
+        query_vector = self.embedder.embed_one(question)
+
+        all_file_vectors = self.doc_index.all_vectors(space_id)
+        file_xyz_all = project_3d([query_vector] + [v for _, v in all_file_vectors])
+        query_file_xyz, file_xyz_rest = file_xyz_all[0], file_xyz_all[1:]
+        file_xyz = {
+            summary.file_path: xyz for (summary, _), xyz in zip(all_file_vectors, file_xyz_rest)
+        }
+
+        # Every chunk in the space, not just a routed-file pool — shared by the
+        # hybrid/rerank/compress plots and the "whole vector space" modal, so the query
+        # lands in the same spot in both instead of two differently-scoped projections.
+        whole_chunk_pool = self.chunk_index.fetch_by_files(space_id, [])
+        whole_chunk_xyz_all = project_3d([query_vector] + [v for _, v in whole_chunk_pool])
+        query_whole_chunk_xyz = whole_chunk_xyz_all[0]
+        whole_chunk_xyz_rest = whole_chunk_xyz_all[1:]
+        whole_chunk_xyz = {
+            chunk.id: xyz for (chunk, _), xyz in zip(whole_chunk_pool, whole_chunk_xyz_rest)
+        }
+        chunk_labels = {
+            chunk.id: f"{chunk.file_path} · {chunk.symbol_name or 'block'}"
+            for chunk, _ in whole_chunk_pool
+        }
+
+        return VectorsTrace(
             query_file_xyz=query_file_xyz,
             file_xyz=file_xyz,
             chunk_labels=chunk_labels,

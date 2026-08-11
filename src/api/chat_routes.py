@@ -210,6 +210,32 @@ def message_trace(message_id: str) -> dict[str, object]:
     return json.loads(row["trace"])
 
 
+@router.get("/messages/{message_id}/vectors")
+def message_vectors(message_id: str) -> dict[str, object]:
+    """The vector-space PCA data, computed on demand instead of on every message send —
+    see Pipeline.vectors_trace(). Re-embeds the same question query_trace() embedded
+    (embedding is deterministic), scoped to the message's own space."""
+    with connect(settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT trace, chat_id FROM messages WHERE id=?", (message_id,)
+        ).fetchone()
+    if row is None or row["trace"] is None:
+        raise HTTPException(status_code=404, detail="No trace for this message")
+    trace = json.loads(row["trace"])
+    if trace.get("meta"):
+        raise HTTPException(status_code=404, detail="No vector space for a conversation-only answer")
+    space_id = _get_chat_row(row["chat_id"])["space_id"]
+    try:
+        vectors = pipeline.vectors_trace(trace["question"], space_id)
+    except UnexpectedResponse as exc:
+        if exc.status_code != 404:
+            raise
+        raise HTTPException(
+            status_code=409, detail=f"Space {space_id!r} has no vectors in Qdrant yet."
+        ) from exc
+    return asdict(vectors)
+
+
 @router.post("/chats/{chat_id}/messages")
 async def send_message(chat_id: str, request: Request, body: SendMessageRequest) -> Response:
     """The full turn: rewrite -> cache check -> retrieve -> compress -> answer -> persist.
