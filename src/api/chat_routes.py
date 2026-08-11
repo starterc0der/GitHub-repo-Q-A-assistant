@@ -59,6 +59,17 @@ def _load_history(chat_id: str, turns: int) -> list[tuple[str, str]]:
     return [(r["role"], r["content"]) for r in reversed(rows)]
 
 
+def _load_full_history(chat_id: str) -> list[tuple[str, str]]:
+    """Every prior turn, unbounded — used only for meta answers ("what have we talked
+    about"), where "everything" has to mean the whole chat, not the same recency-capped
+    window _load_history uses to disambiguate a follow-up question for retrieval."""
+    with connect(settings.db_path) as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE chat_id=? ORDER BY seq", (chat_id,)
+        ).fetchall()
+    return [(r["role"], r["content"]) for r in rows]
+
+
 def _insert_message(
     chat_id: str, role: str, content: str, *,
     standalone_question: str | None = None,
@@ -218,7 +229,39 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
     raw_question = body.content
 
     history = _load_history(chat_id, settings.history_turns)
-    standalone = pipeline.rewrite_standalone(raw_question, history) if history else raw_question
+    try:
+        is_meta, standalone = await _run_cancellable(
+            request, lambda: pipeline.rewrite_standalone(raw_question, history)
+        )
+    except Cancelled:
+        logger.info("Chat message cancelled by client disconnect: %r", raw_question)
+        return Response(status_code=499)
+
+    # A question about the conversation itself ("what have we talked about") rather than
+    # the document — the rewrite call above already classified this as a side effect (see
+    # StandaloneRewriter), so skip retrieval and answer straight from history.
+    if is_meta:
+        # Loaded before the insert below, so the question being asked right now isn't
+        # duplicated into its own history.
+        full_history = _load_full_history(chat_id)
+        _insert_message(chat_id, "user", raw_question)
+        try:
+            content = await _run_cancellable(
+                request, lambda: pipeline.answer_meta(raw_question, full_history)
+            )
+        except Cancelled:
+            logger.info("Chat message cancelled by client disconnect: %r", raw_question)
+            return Response(status_code=499)
+        # No retrieval stages ran, so this isn't a QueryTrace — just the actual
+        # transcript the model saw, so "why did it say that" is still answerable.
+        meta_trace = json.dumps({
+            "meta": True,
+            "question": raw_question,
+            "history": [{"role": role, "content": text} for role, text in full_history],
+        })
+        assistant_id = _insert_message(chat_id, "assistant", content, trace=meta_trace)
+        _touch_chat(chat_id)
+        return JSONResponse(_get_message(assistant_id))
 
     _insert_message(
         chat_id, "user", raw_question,

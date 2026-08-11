@@ -255,6 +255,8 @@
 .rag-btn--ghost { background: var(--panel); color: var(--ink); border: 1px solid var(--border-strong); }
 .rag-btn--ghost:hover:not(:disabled) { background: var(--panel-2); }
 .rag-btn--ghost:disabled { opacity: 0.4; }
+.rag-btn--danger { background: var(--warn); }
+.rag-btn--danger:hover:not(:disabled) { background: var(--warn-ink); }
 .rag-modal__dots { display: flex; gap: 6px; }
 .rag-modal__dot { width: 8px; height: 8px; border-radius: 50%; border: none; background: var(--border-strong); padding: 0; }
 .rag-modal__dot--active { background: var(--accent); width: 20px; border-radius: 4px; }
@@ -381,10 +383,9 @@
   padding: 0; text-decoration: underline; text-underline-offset: 2px;
 }
 
-/* spaces list — kept for SpaceView's own error/loading fallback, which still uses the
-   old flat header shell */
+/* kept for SpaceView's own error/loading fallback, which still uses the old flat header shell */
 .rag-spaces { height: 100%; display: flex; flex-direction: column; }
-.rag-spaces__list { max-width: 760px; margin: 0 auto; width: 100%; padding: 28px 24px 60px; display: flex; flex-direction: column; gap: 10px; }
+.rag-space-error { max-width: 400px; margin: 40px auto; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
 .rag-space-row {
   display: flex; align-items: center; gap: 14px; padding: 14px 16px; background: var(--panel);
   border: 1px solid var(--border); border-radius: 12px; cursor: pointer;
@@ -438,7 +439,7 @@
 .rag-spaces__nav-dot { width: 6px; height: 6px; border-radius: 50%; background: white; flex-shrink: 0; }
 
 .rag-spaces__main { flex: 1; min-width: 0; overflow-y: auto; }
-.rag-spaces__container { max-width: 1200px; padding: 32px 24px 60px; }
+.rag-spaces__container { padding: 32px 40px 60px; }
 .rag-spaces__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .rag-spaces__header h1 { font-size: 21px; margin: 0; }
 .rag-spaces__header p { font-size: 13.5px; color: var(--ink-dim); margin: 4px 0 0; }
@@ -455,6 +456,22 @@
 }
 .rag-modal-card h2 { margin: 0 0 8px; font-size: 17px; }
 .rag-modal-card__actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.rag-modal-card--wide { max-width: 640px; }
+
+.rag-meta-trace {
+  display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto;
+  margin-top: 4px; padding-right: 4px;
+}
+.rag-meta-trace__turn {
+  display: flex; gap: 10px; padding: 8px 10px; border-radius: 8px; background: var(--panel-2);
+  border: 1px solid var(--border); font-size: 13px; line-height: 1.5;
+}
+.rag-meta-trace__turn--user { background: var(--accent-soft); border-color: var(--accent-border); }
+.rag-meta-trace__role {
+  flex-shrink: 0; width: 64px; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--ink-faint); padding-top: 2px;
+}
+.rag-meta-trace__text { flex: 1; min-width: 0; white-space: pre-wrap; }
 .rag-swatches { display: flex; gap: 10px; margin: 4px 0 4px; }
 .rag-swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; padding: 0; }
 .rag-swatch--selected { border-color: var(--ink); }

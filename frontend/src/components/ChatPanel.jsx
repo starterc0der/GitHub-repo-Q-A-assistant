@@ -1,16 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import { createChat, deleteChat, listChats, listMessages, messageTrace, sendMessage } from "../api.js";
-import { cls } from "./RagAtoms.jsx";
+import { cls, ConfirmDialog } from "./RagAtoms.jsx";
 import { BarChart } from "./BarChart.jsx";
 import { PipelineOverlay } from "./PipelineOverlay.jsx";
 
 // [file:Lstart-Lend] markers ground the answer, but they're noise in a casual chat
 // bubble — strip them here. They're still fully visible (as resolved, clickable
 // citations with snippets) in "View pipeline breakdown", which is where verifying a
-// claim actually belongs. Matches src/generate/answer.py's CITATION_PATTERN: grouped
-// ranges in one bracket ([path:L1-L5, L9-L12]), and a bare single line with no dash
-// ([path:L5], common for a one-row citation like a CSV row).
-const CITATION_RE = /\s?\[[^\[\]:]+:L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*\]/g;
+// claim actually belongs. Mirrors src/generate/answer.py's BRACKET_PATTERN/GROUP_PATTERN:
+// a bracket can hold grouped ranges for one file ([path:L1-L5, L9-L12]), a bare single
+// line ([path:L5]), or several path:range groups joined with "; " for one claim
+// ([pathA:L1-L5; pathB:L9-L12] — common once a PDF "path" is "name · p.N" and two pages
+// support the same sentence). Checked group-by-group so a bracket only strips when
+// every "; "-separated part is actually a citation — unrelated bracket text stays.
+const CITATION_BRACKET_RE = /\s?\[([^\[\]]+)\]/g;
+const CITATION_GROUP_RE = /^[^:;]+:L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*$/;
+
+function stripCitations(text) {
+  return text.replace(CITATION_BRACKET_RE, (match, inner) => {
+    const groups = inner.split(";").map((g) => g.trim());
+    return groups.every((g) => CITATION_GROUP_RE.test(g)) ? "" : match;
+  });
+}
 
 // **bold** and `code` spans only — not a full markdown parser, just the two things the
 // answer model actually produces. Built as React elements (never dangerouslySetInnerHTML),
@@ -34,7 +45,7 @@ function renderInline(text) {
 // Splits into paragraphs and "* "/"- " bullet lists — the two block-level shapes the
 // answer model actually produces — then applies inline formatting within each.
 function MessageText({ text }) {
-  const lines = text.replace(CITATION_RE, "").split("\n");
+  const lines = stripCitations(text).split("\n");
   const blocks = [];
   let listItems = null;
   let paraLines = [];
@@ -81,11 +92,11 @@ function MessageBubble({ message, onViewTrace }) {
       {!isUser && (
         <div className="rag-bubble__foot">
           {message.cache_hit ? <span className="rag-tag rag-tag--accent2">served from cache</span> : null}
-          {message.has_trace && (
+          {message.has_trace ? (
             <button className="rag-link-btn" onClick={() => onViewTrace(message.id)}>
               View pipeline breakdown
             </button>
-          )}
+          ) : null}
         </div>
       )}
     </div>
@@ -100,6 +111,7 @@ export function useChatController(spaceId) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
   const [trace, setTrace] = useState(null);
+  const [deleteChatId, setDeleteChatId] = useState(null);
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
 
@@ -132,8 +144,9 @@ export function useChatController(spaceId) {
     setMessages([]);
   }
 
-  async function handleDeleteChat(chatId) {
-    if (!confirm("Delete this chat?")) return;
+  async function confirmDeleteChat() {
+    const chatId = deleteChatId;
+    setDeleteChatId(null);
     await deleteChat(chatId);
     if (activeChatId === chatId) setActiveChatId(null);
     refreshChats();
@@ -184,11 +197,11 @@ export function useChatController(spaceId) {
 
   return {
     chats, activeChatId, setActiveChatId, messages, input, setInput, sending, error, trace, setTrace,
-    scrollRef, handleNewChat, handleDeleteChat, handleSend, handleStop, handleViewTrace,
+    scrollRef, handleNewChat, deleteChatId, setDeleteChatId, confirmDeleteChat, handleSend, handleStop, handleViewTrace,
   };
 }
 
-export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewChat, handleDeleteChat }) {
+export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewChat, deleteChatId, setDeleteChatId, confirmDeleteChat }) {
   return (
     <>
       <button className="rag-chat__new-btn" onClick={handleNewChat}>
@@ -206,7 +219,7 @@ export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewCha
               className="rag-icon-btn"
               onClick={(e) => {
                 e.stopPropagation();
-                handleDeleteChat(c.id);
+                setDeleteChatId(c.id);
               }}
             >
               ×
@@ -214,7 +227,46 @@ export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewCha
           </div>
         ))}
       </div>
+
+      {deleteChatId && (
+        <ConfirmDialog
+          title="Delete this chat?"
+          message="This permanently deletes the chat and its messages."
+          onCancel={() => setDeleteChatId(null)}
+          onConfirm={confirmDeleteChat}
+        />
+      )}
     </>
+  );
+}
+
+// No retrieval ran for a meta answer ("what have we discussed") — this shows the actual
+// transcript sent to the model instead of the PipelineOverlay's route/hybrid/rerank/
+// compress rail, which has nothing to show for a plain history-grounded reply.
+function MetaTraceModal({ data, onClose }) {
+  return (
+    <div className="rag-modal-backdrop" onClick={onClose}>
+      <div className="rag-modal-card rag-modal-card--wide" onClick={(e) => e.stopPropagation()}>
+        <h2>{data.question}</h2>
+        <p className="rag-dim">
+          Conversation-only answer — no document retrieval ran. Answered from{" "}
+          {data.history.length} prior message{data.history.length === 1 ? "" : "s"} in this chat.
+        </p>
+        <div className="rag-meta-trace">
+          {data.history.map((m, i) => (
+            <div key={i} className={cls("rag-meta-trace__turn", `rag-meta-trace__turn--${m.role}`)}>
+              <span className="rag-meta-trace__role">{m.role}</span>
+              <span className="rag-meta-trace__text">{m.content}</span>
+            </div>
+          ))}
+        </div>
+        <div className="rag-modal-card__actions">
+          <button type="button" className="rag-btn" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -251,7 +303,11 @@ export function ChatMain({ messages, sending, error, input, setInput, handleSend
       </form>
 
       {trace && (
-        <PipelineOverlay mode="query" data={trace} title={trace.question} onClose={() => setTrace(null)} />
+        trace.meta ? (
+          <MetaTraceModal data={trace} onClose={() => setTrace(null)} />
+        ) : (
+          <PipelineOverlay mode="query" data={trace} title={trace.question} onClose={() => setTrace(null)} />
+        )
       )}
     </div>
   );

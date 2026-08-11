@@ -51,7 +51,18 @@ class LLMClient:
                     self.url, headers=headers, json=payload, timeout=self.timeout
                 )
             except requests.RequestException as exc:
-                raise RuntimeError(f"Could not reach {self.url} ({self.model}): {exc}") from exc
+                # A read timeout or connection drop is usually transient (a momentarily
+                # slow provider, a network blip) — worth the same retry ladder as a 429/5xx
+                # instead of failing the whole request on the first hiccup.
+                if attempt == self.max_retries - 1:
+                    raise RuntimeError(f"Could not reach {self.url} ({self.model}): {exc}") from exc
+                delay = min(2**attempt, 65) + random.uniform(0, 1)
+                logger.warning(
+                    "%s request to %s failed, retrying in %.1fs [%d/%d]: %s",
+                    self.model, self.url, delay, attempt + 1, self.max_retries, exc,
+                )
+                interruptible_sleep(delay)
+                continue
 
             # A per-minute burst clears in seconds; a daily quota does not clear until the
             # provider's reset, so retrying just burns the ladder to reach the same 429.

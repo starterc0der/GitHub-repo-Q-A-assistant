@@ -84,6 +84,7 @@ class Pipeline:
         # standalone-question rewrite and broad-intent classification at chat time.
         bulk_llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_bulk_model)
         llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
+        self.bulk_llm = bulk_llm
 
         self.summarizer = Summarizer(bulk_llm)
         self.contextualizer = Contextualizer(bulk_llm)
@@ -208,9 +209,9 @@ class Pipeline:
             )
             chunk_spans.append((start, len(chunks)))
 
-        yield IngestProgress(
-            stage="embed", message="Embedding + indexing…", files_done=len(paths), files_total=len(paths)
-        )
+        # No per-chunk progress is available inside embed()/upsert() — indeterminate
+        # (files_total=0), same convention as clone/walk/summarize, instead of a fake 100%.
+        yield IngestProgress(stage="embed", message="Embedding + indexing…")
         yield self._finish_ingest(
             space_id, source_id, "repo", name, uri, collection_summary,
             file_summaries, chunks, chunk_spans, clone_trace, walk_trace,
@@ -271,9 +272,9 @@ class Pipeline:
             chunks.extend(file_chunks)
             chunk_spans.append((start, len(chunks)))
 
-        yield IngestProgress(
-            stage="embed", message="Embedding + indexing…", files_done=len(files), files_total=len(files)
-        )
+        # No per-chunk progress is available inside embed()/upsert() — indeterminate
+        # (files_total=0), same convention as clone/walk/summarize, instead of a fake 100%.
+        yield IngestProgress(stage="embed", message="Embedding + indexing…")
         yield self._finish_ingest(
             space_id, source_id, kind, name, uri, "", file_summaries, chunks, chunk_spans, None, None
         )
@@ -359,11 +360,32 @@ class Pipeline:
         "specific, try naming a file, page, or topic you're looking for."
     )
 
-    def rewrite_standalone(self, question: str, history: list[tuple[str, str]]) -> str:
+    def rewrite_standalone(self, question: str, history: list[tuple[str, str]]) -> tuple[bool, str]:
         """One cheap LLM call that resolves history-dependent references ("there", "it")
         into a self-contained question — the only thing retrieval ever sees. Skipped
-        entirely when history is empty, so single-shot questions pay nothing extra."""
+        entirely when history is empty, so single-shot questions pay nothing extra.
+
+        Returns (is_meta, text): is_meta means the question is about the conversation
+        itself ("what have we discussed") rather than the document — see answer_meta."""
         return self.rewriter.rewrite(question, history)
+
+    # "What have we talked about" is a question about the CONVERSATION, not the document —
+    # the main answer prompt forbids using anything but retrieved chunks (so it always
+    # refuses these), and retrieval itself would just burn a request trying to match
+    # document content that was never the point. Bypasses retrieval entirely; bulk model,
+    # since this is a plain recall/summary over a few chat turns, not deep reasoning.
+    META_CHAT_SYSTEM_PROMPT = (
+        "You are answering a question about THIS CONVERSATION so far — not about any "
+        "document. Answer using only the conversation history provided; do not claim or "
+        "invent anything about a source document beyond what was already said in this "
+        "chat. When asked what topics, people, or items were discussed, list only the "
+        "ones that were the actual subject of a question or a direct answer — not every "
+        "name that happened to appear in passing inside an answer's supporting detail. "
+        "Be concise."
+    )
+
+    def answer_meta(self, question: str, history: list[tuple[str, str]]) -> str:
+        return self.bulk_llm.complete(question, system=self.META_CHAT_SYSTEM_PROMPT, history=history)
 
     def _wide_fallback_chunks(self, space_id: str, source_ids: list[str]) -> list[CodeChunk]:
         """Every chunk in the routed source(s), whole — for a question no single chunk can

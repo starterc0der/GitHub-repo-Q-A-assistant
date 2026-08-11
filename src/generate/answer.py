@@ -9,10 +9,14 @@ from src.llm_client import LLMClient
 
 # Normally one range per bracket ([path:L1-L5]), but models sometimes group several
 # ranges for the same file into one bracket ([path:L1-L5, L9-L12]) despite the prompt
-# asking for one marker per claim, or — especially for a single-row citation, e.g. one
-# CSV row — drop the range entirely and write just [path:L5]. RANGE_PATTERN accepts both
-# so a citation to one line still resolves instead of silently matching nothing.
-CITATION_PATTERN = re.compile(r"\[([^\]:]+):(L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*)\]")
+# asking for one marker per claim, drop the range entirely for a single-row citation
+# ([path:L5]), or — citing two different sources for one claim — join separate
+# path:range groups with "; " in one bracket ([pathA:L1-L5; pathB:L9-L12], common once
+# a PDF/DOCX "path" is itself "name · p.N" and two pages support the same sentence).
+# BRACKET_PATTERN grabs the whole bracket; GROUP_PATTERN then splits it into one or
+# more (path, ranges) pairs; RANGE_PATTERN accepts both range shapes above.
+BRACKET_PATTERN = re.compile(r"\[([^\[\]]+)\]")
+GROUP_PATTERN = re.compile(r"([^:;]+):(L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*)")
 RANGE_PATTERN = re.compile(r"L(\d+)(?:-L(\d+))?")
 CHART_PATTERN = re.compile(r"```chart\s*\n(.*?)\n```", re.DOTALL)
 
@@ -110,21 +114,23 @@ class CitationParser:
 
     def parse(self, text: str, chunks: list[CodeChunk]) -> list[Citation]:
         citations = []
-        for file_path, ranges in CITATION_PATTERN.findall(text):
-            for start_str, end_str in RANGE_PATTERN.findall(ranges):
-                start_line = int(start_str)
-                end_line = int(end_str) if end_str else start_line
-                chunk = self._find_chunk(file_path, start_line, chunks)
-                if chunk is None:
-                    continue
-                citations.append(
-                    Citation(
-                        file_path=file_path,
-                        start_line=start_line,
-                        end_line=end_line,
-                        snippet=self._extract_snippet(chunk, start_line, end_line),
+        for bracket in BRACKET_PATTERN.findall(text):
+            for file_path, ranges in GROUP_PATTERN.findall(bracket):
+                file_path = file_path.strip()
+                for start_str, end_str in RANGE_PATTERN.findall(ranges):
+                    start_line = int(start_str)
+                    end_line = int(end_str) if end_str else start_line
+                    chunk = self._find_chunk(file_path, start_line, chunks)
+                    if chunk is None:
+                        continue
+                    citations.append(
+                        Citation(
+                            file_path=file_path,
+                            start_line=start_line,
+                            end_line=end_line,
+                            snippet=self._extract_snippet(chunk, start_line, end_line),
+                        )
                     )
-                )
         return citations
 
     def _find_chunk(

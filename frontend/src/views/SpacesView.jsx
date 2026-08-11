@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createSpace, deleteSpace, listSpaces } from "../api.js";
-import { AVATAR_BG, AVATAR_INK, timeAgo } from "../components/RagAtoms.jsx";
+import { AVATAR_BG, AVATAR_INK, ConfirmDialog, timeAgo } from "../components/RagAtoms.jsx";
 
 const COLORS = ["accent", "accent2", "warn", "doc"];
 
@@ -58,6 +58,7 @@ export function SpacesView({ onOpen }) {
   const [spaces, setSpaces] = useState(null);
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [deleteId, setDeleteId] = useState(null);
 
   function refresh() {
     setError(null);
@@ -68,10 +69,14 @@ export function SpacesView({ onOpen }) {
 
   useEffect(refresh, []);
 
-  async function handleDelete(e, id) {
+  function handleDelete(e, id) {
     e.stopPropagation();
-    if (!confirm("Delete this space and everything in it?")) return;
-    await deleteSpace(id);
+    setDeleteId(id);
+  }
+
+  async function confirmDelete() {
+    await deleteSpace(deleteId);
+    setDeleteId(null);
     refresh();
   }
 
@@ -157,6 +162,15 @@ export function SpacesView({ onOpen }) {
             setShowCreate(false);
             refresh();
           }}
+        />
+      )}
+
+      {deleteId && (
+        <ConfirmDialog
+          title="Delete this space?"
+          message="This deletes the space and everything in it — sources, chats, and messages."
+          onCancel={() => setDeleteId(null)}
+          onConfirm={confirmDelete}
         />
       )}
     </div>

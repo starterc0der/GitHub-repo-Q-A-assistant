@@ -70,3 +70,21 @@ def test_parse_accepts_a_mix_of_bare_and_ranged_lines_in_one_bracket() -> None:
     citations = CitationParser().parse(text, [chunk])
 
     assert [(c.start_line, c.end_line) for c in citations] == [(105, 105), (150, 152)]
+
+
+def test_parse_accepts_semicolon_joined_groups_for_different_files() -> None:
+    """One claim citing two different sources ([pathA:L1-L5; pathB:L9-L12]) — common
+    once a PDF/DOCX "path" is "name · p.N" and two pages support the same sentence."""
+    chunk_a = _chunk("Ramayana.pdf · p.43", 1, 30, "\n".join(f"line{i}" for i in range(1, 31)))
+    chunk_b = _chunk("Ramayana.pdf · p.162", 1, 30, "\n".join(f"line{i}" for i in range(1, 31)))
+    text = "Rama is the son of Dasa-ratha [Ramayana.pdf · p.43:L8; Ramayana.pdf · p.162:L9-L19]."
+
+    citations = CitationParser().parse(text, [chunk_a, chunk_b])
+
+    assert len(citations) == 2
+    assert (citations[0].file_path, citations[0].start_line, citations[0].end_line) == (
+        "Ramayana.pdf · p.43", 8, 8,
+    )
+    assert (citations[1].file_path, citations[1].start_line, citations[1].end_line) == (
+        "Ramayana.pdf · p.162", 9, 19,
+    )

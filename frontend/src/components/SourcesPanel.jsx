@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createSource, deleteSource, sourceIngestStream, sourceTrace, uploadSource } from "../api.js";
-import { cls, timeAgo } from "./RagAtoms.jsx";
+import { cls, ConfirmDialog, timeAgo } from "./RagAtoms.jsx";
 import { PipelineOverlay } from "./PipelineOverlay.jsx";
 
 const KIND_LABEL = { repo: "REPO", pdf: "PDF", docx: "DOC", text: "TXT", csv: "CSV" };
@@ -250,6 +250,7 @@ export function useSourcesController(spaceId, sources, onRefresh) {
   const [loadingBreakdown, setLoadingBreakdown] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
+  const [deleteId, setDeleteId] = useState(null);
   const fileRef = useRef(null);
 
   const detailSource = sources.find((s) => s.id === detailId) || null;
@@ -281,9 +282,13 @@ export function useSourcesController(spaceId, sources, onRefresh) {
     }
   }
 
-  async function handleDelete(sourceId) {
-    if (!confirm("Delete this source? This removes its indexed data too.")) return;
-    await deleteSource(sourceId);
+  function handleDelete(sourceId) {
+    setDeleteId(sourceId);
+  }
+
+  async function confirmDelete() {
+    await deleteSource(deleteId);
+    setDeleteId(null);
     setDetailId(null);
     onRefresh();
   }
@@ -303,7 +308,8 @@ export function useSourcesController(spaceId, sources, onRefresh) {
 
   return {
     filter, setFilter, modal, setModal, detailSource, setDetailId, breakdown, setBreakdown, loadingBreakdown,
-    uploading, uploadError, fileRef, handleFile, handleDelete, openBreakdown, counts, filtered, sources, spaceId, onRefresh,
+    uploading, uploadError, fileRef, handleFile, handleDelete, deleteId, setDeleteId, confirmDelete, openBreakdown,
+    counts, filtered, sources, spaceId, onRefresh,
   };
 }
 
@@ -327,7 +333,8 @@ export function SourcesSidebar({ filter, setFilter, counts, sources }) {
 
 export function SourcesMain({
   spaceId, sources, filtered, modal, setModal, detailSource, setDetailId, breakdown, setBreakdown,
-  loadingBreakdown, uploading, uploadError, fileRef, handleFile, handleDelete, openBreakdown, onRefresh,
+  loadingBreakdown, uploading, uploadError, fileRef, handleFile, handleDelete, deleteId, setDeleteId, confirmDelete,
+  openBreakdown, onRefresh,
 }) {
   return (
     <div className="rag-sources__main">
@@ -381,6 +388,14 @@ export function SourcesMain({
           onClose={() => setDetailId(null)}
           onDelete={handleDelete}
           onViewBreakdown={openBreakdown}
+        />
+      )}
+      {deleteId && (
+        <ConfirmDialog
+          title="Delete this source?"
+          message="This removes the source and its indexed data."
+          onCancel={() => setDeleteId(null)}
+          onConfirm={confirmDelete}
         />
       )}
       {loadingBreakdown && (

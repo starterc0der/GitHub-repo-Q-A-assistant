@@ -29,7 +29,7 @@ export function SpaceView({ spaceId, onBack }) {
             ← Spaces
           </button>
         </header>
-        <div className="rag-spaces__list">
+        <div className="rag-space-error">
           <p className="rag-error">Could not load this space: {error}</p>
           <button className="rag-btn" onClick={refresh}>
             Retry

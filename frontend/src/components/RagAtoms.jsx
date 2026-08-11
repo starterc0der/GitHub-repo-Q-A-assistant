@@ -17,6 +17,25 @@ export function timeAgo(iso) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+export function ConfirmDialog({ title, message, confirmLabel = "Delete", onConfirm, onCancel }) {
+  return (
+    <div className="rag-modal-backdrop" onClick={onCancel}>
+      <div className="rag-modal-card" onClick={(e) => e.stopPropagation()}>
+        <h2>{title}</h2>
+        <p className="rag-dim">{message}</p>
+        <div className="rag-modal-card__actions">
+          <button type="button" className="rag-btn rag-btn--ghost" onClick={onCancel}>
+            Cancel
+          </button>
+          <button type="button" className="rag-btn rag-btn--danger" onClick={onConfirm}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RagTag({ children, tone }) {
   return <span className={cls("rag-tag", tone && `rag-tag--${tone}`)}>{children}</span>;
 }
