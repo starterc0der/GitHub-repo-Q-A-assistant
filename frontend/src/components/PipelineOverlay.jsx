@@ -77,6 +77,24 @@ export function PipelineOverlay({ mode, data, title, onClose }) {
           ×
         </button>
       </header>
+      {isQuery && !!data.cache_hit && (
+        <div className="rag-callout rag-overlay__cache-note">
+          <span className="rag-callout__label">
+            {data.cache_kind === "semantic"
+              ? "served from cache — semantic match, not a fresh retrieval"
+              : "served from cache — exact match, not a fresh retrieval"}
+          </span>
+          {data.cache_kind === "semantic" && (
+            <p className="rag-mono">
+              matched &ldquo;{data.cache_match_question}&rdquo; · similarity {data.cache_match_score?.toFixed(3)}
+            </p>
+          )}
+          <p className="rag-hint">
+            Everything below is the pipeline that produced the ORIGINAL cached answer, not
+            something that ran again for this question.
+          </p>
+        </div>
+      )}
       <div className="rag-overlay__body">
         <aside className="rag-overlay__rail">
           {isQuery ? (

@@ -1,27 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { createChat, deleteChat, listChats, listMessages, messageTrace, messageVectors, sendMessage } from "../api.js";
+import { createChat, deleteChat, listChats, listMessages, sendMessage } from "../api.js";
 import { cls, ConfirmDialog } from "./RagAtoms.jsx";
 import { BarChart } from "./BarChart.jsx";
-import { PipelineOverlay } from "./PipelineOverlay.jsx";
-
-// [file:Lstart-Lend] markers ground the answer, but they're noise in a casual chat
-// bubble — strip them here. They're still fully visible (as resolved, clickable
-// citations with snippets) in "View pipeline breakdown", which is where verifying a
-// claim actually belongs. Mirrors src/generate/answer.py's BRACKET_PATTERN/GROUP_PATTERN:
-// a bracket can hold grouped ranges for one file ([path:L1-L5, L9-L12]), a bare single
-// line ([path:L5]), or several path:range groups joined with "; " for one claim
-// ([pathA:L1-L5; pathB:L9-L12] — common once a PDF "path" is "name · p.N" and two pages
-// support the same sentence). Checked group-by-group so a bracket only strips when
-// every "; "-separated part is actually a citation — unrelated bracket text stays.
-const CITATION_BRACKET_RE = /\s?\[([^\[\]]+)\]/g;
-const CITATION_GROUP_RE = /^[^:;]+:L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*$/;
-
-function stripCitations(text) {
-  return text.replace(CITATION_BRACKET_RE, (match, inner) => {
-    const groups = inner.split(";").map((g) => g.trim());
-    return groups.every((g) => CITATION_GROUP_RE.test(g)) ? "" : match;
-  });
-}
 
 // **bold** and `code` spans only — not a full markdown parser, just the two things the
 // answer model actually produces. Built as React elements (never dangerouslySetInnerHTML),
@@ -45,7 +25,7 @@ function renderInline(text) {
 // Splits into paragraphs and "* "/"- " bullet lists — the two block-level shapes the
 // answer model actually produces — then applies inline formatting within each.
 function MessageText({ text }) {
-  const lines = stripCitations(text).split("\n");
+  const lines = text.split("\n");
   const blocks = [];
   let listItems = null;
   let paraLines = [];
@@ -83,23 +63,12 @@ function MessageText({ text }) {
   return <>{blocks}</>;
 }
 
-function MessageBubble({ message, onViewTrace, loadingTraceId }) {
+function MessageBubble({ message }) {
   const isUser = message.role === "user";
-  const loading = loadingTraceId === message.id;
   return (
     <div className={cls("rag-bubble", isUser ? "rag-bubble--user" : "rag-bubble--assistant")}>
       <MessageText text={message.content} />
       {message.chart && <BarChart chart={message.chart} />}
-      {!isUser && (
-        <div className="rag-bubble__foot">
-          {message.cache_hit ? <span className="rag-tag rag-tag--accent2">served from cache</span> : null}
-          {message.has_trace ? (
-            <button className="rag-link-btn" disabled={loading} onClick={() => onViewTrace(message.id)}>
-              {loading ? "Loading…" : "View pipeline breakdown"}
-            </button>
-          ) : null}
-        </div>
-      )}
     </div>
   );
 }
@@ -111,9 +80,8 @@ export function useChatController(spaceId) {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
-  const [trace, setTrace] = useState(null);
-  const [loadingTraceId, setLoadingTraceId] = useState(null);
   const [deleteChatId, setDeleteChatId] = useState(null);
+  const [streamingText, setStreamingText] = useState("");
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
 
@@ -138,7 +106,7 @@ export function useChatController(spaceId) {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamingText]);
 
   async function handleNewChat() {
     const chat = await createChat(spaceId);
@@ -169,13 +137,16 @@ export function useChatController(spaceId) {
     setInput("");
     setSending(true);
     setError(null);
+    setStreamingText("");
     // Optimistic user bubble — replaced by the server's copy on the post-send refetch.
     setMessages((m) => [...m, { id: "pending-user", role: "user", content }]);
 
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await sendMessage(chatId, content, controller.signal);
+      await sendMessage(chatId, content, controller.signal, (delta) =>
+        setStreamingText((t) => t + delta)
+      );
       const data = await listMessages(chatId);
       setMessages(data.messages);
       refreshChats(chatId);
@@ -185,6 +156,7 @@ export function useChatController(spaceId) {
       setMessages(data.messages);
     } finally {
       setSending(false);
+      setStreamingText("");
       abortRef.current = null;
     }
   }
@@ -193,22 +165,10 @@ export function useChatController(spaceId) {
     abortRef.current?.abort();
   }
 
-  async function handleViewTrace(messageId) {
-    setLoadingTraceId(messageId);
-    try {
-      const t = await messageTrace(messageId);
-      // No vector-space data for a conversation-only (meta) answer — nothing to fetch.
-      if (!t.meta) Object.assign(t, await messageVectors(messageId));
-      setTrace(t);
-    } finally {
-      setLoadingTraceId(null);
-    }
-  }
-
   return {
-    chats, activeChatId, setActiveChatId, messages, input, setInput, sending, error, trace, setTrace,
-    loadingTraceId, scrollRef, handleNewChat, deleteChatId, setDeleteChatId, confirmDeleteChat,
-    handleSend, handleStop, handleViewTrace,
+    chats, activeChatId, setActiveChatId, messages, input, setInput, sending, error,
+    streamingText, scrollRef, handleNewChat, deleteChatId, setDeleteChatId, confirmDeleteChat,
+    handleSend, handleStop,
   };
 }
 
@@ -251,46 +211,24 @@ export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewCha
   );
 }
 
-// No retrieval ran for a meta answer ("what have we discussed") — this shows the actual
-// transcript sent to the model instead of the PipelineOverlay's route/hybrid/rerank/
-// compress rail, which has nothing to show for a plain history-grounded reply.
-function MetaTraceModal({ data, onClose }) {
-  return (
-    <div className="rag-modal-backdrop" onClick={onClose}>
-      <div className="rag-modal-card rag-modal-card--wide" onClick={(e) => e.stopPropagation()}>
-        <h2>{data.question}</h2>
-        <p className="rag-dim">
-          Conversation-only answer — no document retrieval ran. Answered from{" "}
-          {data.history.length} prior message{data.history.length === 1 ? "" : "s"} in this chat.
-        </p>
-        <div className="rag-meta-trace">
-          {data.history.map((m, i) => (
-            <div key={i} className={cls("rag-meta-trace__turn", `rag-meta-trace__turn--${m.role}`)}>
-              <span className="rag-meta-trace__role">{m.role}</span>
-              <span className="rag-meta-trace__text">{m.content}</span>
-            </div>
-          ))}
-        </div>
-        <div className="rag-modal-card__actions">
-          <button type="button" className="rag-btn" onClick={onClose}>
-            Close
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function ChatMain({ messages, sending, error, input, setInput, handleSend, handleStop, handleViewTrace, loadingTraceId, scrollRef, trace, setTrace }) {
+export function ChatMain({ messages, sending, streamingText, error, input, setInput, handleSend, handleStop, scrollRef }) {
   return (
     <div className="rag-chat__main">
       <div className="rag-chat__messages-viewport" ref={scrollRef}>
         <div className="rag-chat__messages">
           {messages.length === 0 && <p className="rag-hint">Ask a question about this space's sources.</p>}
           {messages.map((m) => (
-            <MessageBubble key={m.id} message={m} onViewTrace={handleViewTrace} loadingTraceId={loadingTraceId} />
+            <MessageBubble key={m.id} message={m} />
           ))}
-          {sending && <div className="rag-bubble rag-bubble--assistant rag-bubble--thinking">Thinking…</div>}
+          {sending && (
+            streamingText ? (
+              <div className="rag-bubble rag-bubble--assistant">
+                <MessageText text={streamingText} />
+              </div>
+            ) : (
+              <div className="rag-bubble rag-bubble--assistant rag-bubble--thinking">Thinking…</div>
+            )
+          )}
         </div>
       </div>
       {error && <p className="rag-error">{error}</p>}
@@ -312,14 +250,6 @@ export function ChatMain({ messages, sending, error, input, setInput, handleSend
           </button>
         )}
       </form>
-
-      {trace && (
-        trace.meta ? (
-          <MetaTraceModal data={trace} onClose={() => setTrace(null)} />
-        ) : (
-          <PipelineOverlay mode="query" data={trace} title={trace.question} onClose={() => setTrace(null)} />
-        )
-      )}
     </div>
   );
 }

@@ -181,7 +181,6 @@
 .rag-answer { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; }
 .rag-answer p { font-size: 14.5px; line-height: 1.6; margin: 0; }
 .rag-answer__meta { margin: 12px 0 4px; }
-.rag-answer__citations { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 14px; }
 
 .rag-prompt { background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 8px 0; overflow-x: auto; }
 .rag-prompt pre { margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }
@@ -299,14 +298,6 @@
   display: block; margin-top: 12px; font-family: var(--mono); font-size: 11px;
   color: var(--ink-faint);
 }
-/* inline citation pill — makes grounded vs ungrounded sentences scannable at a glance */
-.rag-cite {
-  display: inline-block; font-family: var(--mono); font-size: 11.5px;
-  background: var(--panel); border: 1px solid var(--accent-border); border-radius: 5px;
-  padding: 0 5px; margin: 0 2px; color: var(--accent-ink); white-space: nowrap;
-  vertical-align: baseline;
-}
-
 /* expand/collapse for long file lists in the ingest view */
 .rag-more-btn {
   display: block; width: 100%; margin: 10px 0 4px; padding: 9px 12px;
@@ -495,8 +486,9 @@
 .rag-space-sidebar__info-count { font-size: 11.5px; color: var(--sidebar-ink-faint); }
 .rag-space-sidebar__tabs { display: flex; gap: 4px; background: var(--sidebar-btn-bg); padding: 3px; border-radius: 8px; }
 .rag-space-sidebar__tab {
-  flex: 1; border: none; background: none; padding: 6px 10px; border-radius: 6px;
-  font-size: 12.5px; font-weight: 600; color: var(--sidebar-ink-dim); cursor: pointer;
+  flex: 1; min-width: 0; border: none; background: none; padding: 6px 6px; border-radius: 6px;
+  font-size: 11.5px; font-weight: 600; color: var(--sidebar-ink-dim); cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .rag-space-sidebar__tab--active { background: var(--sidebar-active); color: white; }
 .rag-space-sidebar__content { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
@@ -633,5 +625,75 @@
 .rag-overlay__eyebrow { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent-ink); }
 .rag-overlay__head h2 { font-size: 18px; margin: 2px 0 0; font-weight: 600; }
 .rag-overlay__body { flex: 1; min-height: 0; display: flex; }
+.rag-overlay__cache-note { margin: 14px 24px 0; flex-shrink: 0; }
 .rag-overlay__rail { width: 340px; flex-shrink: 0; border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; padding: 20px 18px 32px; display: flex; flex-direction: column; gap: 22px; }
 .rag-overlay__content { flex: 1; overflow-y: auto; padding: 28px 40px 80px; }
+
+/* space insights dashboard — Space Overview / Chat Overview, full-width under the
+   shared space sidebar shell (no secondary sidebar of its own, per Insights.dc.html).
+   Question Detail reuses the existing fullscreen PipelineOverlay rather than a third
+   level here — same component, same cache-hit banner, opened as a modal on top. */
+.rag-insights-shell { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.rag-insights-breadcrumb { flex-shrink: 0; padding: 16px 32px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 6px; }
+.rag-breadcrumb__link { border: none; background: none; padding: 0; font-size: 13px; font-weight: 600; color: var(--ink-dim); cursor: pointer; }
+.rag-breadcrumb__link--current { color: var(--ink); cursor: default; }
+.rag-breadcrumb__sep { font-size: 12px; color: var(--ink-faint); }
+.rag-breadcrumb__current { font-size: 13px; font-weight: 700; color: var(--ink); max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rag-insights-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.rag-insights { padding: 24px 32px 60px; }
+
+.rag-insight-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
+.rag-insight-card { min-width: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 15px 17px; }
+.rag-insight-card__label { display: block; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint); margin-bottom: 8px; }
+.rag-insight-card__value { display: block; font-size: 22px; font-weight: 700; font-family: var(--mono); line-height: 1; }
+.rag-insight-card__sub { display: block; font-size: 10.5px; color: var(--ink-faint); margin-top: 6px; }
+
+.rag-insight-row { display: grid; grid-template-columns: 1.1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.rag-insight-panel { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 18px 20px; }
+.rag-insight-panel__title { font-size: 13px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
+.rag-insight-panel__legend { display: flex; gap: 12px; font-size: 10.5px; font-weight: 600; color: var(--ink-faint); }
+.rag-insight-panel__legend span { display: flex; align-items: center; gap: 4px; }
+
+.rag-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+.rag-dot--accent { background: var(--accent); }
+.rag-dot--local { background: var(--border-strong); }
+
+.rag-gate-trend__legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 8px; }
+.rag-gate-trend__svg { width: 100%; height: 150px; display: block; }
+.rag-gate-bar__legend-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-dim); white-space: nowrap; }
+.rag-gate-bar__legend-item .rag-mono { margin-left: 2px; }
+.rag-gate-bar__dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.rag-gate-bar__dot--accent2 { background: var(--accent2); }
+.rag-gate-bar__dot--warn { background: var(--warn); }
+.rag-gate-bar__dot--accent { background: var(--accent); }
+
+.rag-stage-bars { display: flex; flex-direction: column; gap: 7px; }
+.rag-stage-bars__row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.rag-stage-bars__label { width: 100px; flex-shrink: 0; color: var(--ink-dim); }
+.rag-stage-bars__track { flex: 1; background: var(--panel-2); border-radius: 4px; height: 8px; position: relative; overflow: hidden; }
+.rag-stage-bars__fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
+.rag-stage-bars__fill--accent { background: var(--accent); }
+.rag-stage-bars__fill--local { background: var(--border-strong); }
+.rag-stage-bars__ms { width: 46px; flex-shrink: 0; text-align: right; color: var(--ink-faint); }
+
+.rag-insight-table { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); overflow: hidden; margin-bottom: 16px; }
+.rag-insight-table__title { padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 700; }
+.rag-insight-table__head {
+  display: grid; gap: 8px; padding: 8px 20px; font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-faint); border-bottom: 1px solid var(--border);
+}
+.rag-insight-table__row {
+  display: grid; gap: 8px; padding: 10px 20px; font-size: 12.5px; cursor: pointer;
+  border-bottom: 1px solid var(--panel-2); align-items: center;
+}
+.rag-insight-table__row:last-child { border-bottom: none; }
+.rag-insight-table__row:hover { background: var(--panel-2); }
+.rag-insight-table__strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rag-insight-table__truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.rag-insight-table__model { font-size: 11px; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.rag-filter-btn {
+  border: 1px solid var(--border-strong); background: var(--panel); color: var(--ink-dim);
+  border-radius: 999px; padding: 7px 13px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.rag-filter-btn--active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }

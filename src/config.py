@@ -43,9 +43,25 @@ class Settings(BaseSettings):
     hybrid_bm25_weight: float = 0.25
     # Cross-encoder reranking: final number of chunks handed to compression/generation.
     rerank_top_k: int = 6
+    # Compound questions ("what does X do, and how is Y different?") are split into at
+    # most this many independent sub-questions, each retrieved in parallel, before the
+    # shared compress/generate steps. 1 disables decomposition entirely.
+    max_subquestions: int = 3
+    # Semantic cache: on an exact-match miss, a turn-1 question is compared (cosine) to
+    # every previously-cached turn-1 question in the space; a hit above this score reuses
+    # that answer with zero retrieval/generation. Deliberately conservative — a false
+    # positive here serves a confidently WRONG answer, unlike a miss which only costs
+    # time. Tune down only after checking real near-miss pairs, not by feel.
+    semantic_cache_min_score: float = 0.92
     # If the best reranked chunk scores below this, nothing in the repo answers the
     # question. Measured: off-topic tops out at 0.0, weakest real match was 0.35.
     rerank_min_top_score: float = 0.01
+    # Disambiguates zero reranked chunks: broad question (go wide) vs. off-topic (say
+    # NO_MATCH). Below this route score, treat it as off-topic. Measured across 3 spaces,
+    # 12 questions (evals/golden_set.py): off-topic tops out at 0.4876, on-topic (broad
+    # and factual) bottoms out at 0.5351 — still a real gap, just off-center from the
+    # first 0.48 guess. Re-check with `make eval` if this space's content shifts.
+    route_min_top_score: float = 0.50
     # Whole-document fallback (e.g. "summarize the story"): no single chunk answers such a
     # question, so the rerank gate above always rejects it. When that happens, the routed
     # file(s) are sent whole instead of chunk-by-chunk — but only up to this token budget,

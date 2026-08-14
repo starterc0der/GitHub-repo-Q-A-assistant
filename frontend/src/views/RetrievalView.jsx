@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { RagChunkCard, RagCode, RagEmbedding, RagScorePill, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
+import { RagChunkCard, RagEmbedding, RagScorePill, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
 import {
   RagVectorSpace,
   pointsForCompress,
@@ -19,25 +19,52 @@ export const RETRIEVAL_STAGES = [
   { id: "answer", title: "LLM answer" },
 ];
 
+function splitSuffix(data) {
+  return data.sub_questions?.length ? ` · from ${data.sub_questions.length} sub-qs` : "";
+}
+
+// stage id -> the timings/tokens key(s) it corresponds to, and whether that key is ever
+// a real LLM call (vs. always-local computation) — see STAGE_IS_API on the backend
+// (src/api/insights_routes.py) for the matching source of truth.
+const STAGE_TIMING_KEY = {
+  "q-embed": "embed", route: "route", hybrid: "hybrid", rerank: "rerank",
+  compress: "compress", answer: "generate",
+};
+const TIMING_IS_API = { embed: false, route: false, hybrid: false, rerank: false, compress: true, generate: true };
+
+function fmtMs(ms) {
+  if (ms == null) return null;
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+}
+
+function timingSuffix(data, id) {
+  const key = STAGE_TIMING_KEY[id];
+  const ms = key && data.timings?.[key];
+  if (ms == null) return "";
+  return ` · ${fmtMs(ms)}${TIMING_IS_API[key] ? "" : " (local)"}`;
+}
+
 function retrievalStageMeta(data, id) {
   switch (id) {
     case "q-embed":
-      return `${data.query_embedding.dim}d vector`;
+      return `${data.query_embedding.dim}d vector${splitSuffix(data)}${timingSuffix(data, id)}`;
     case "route":
-      return `${data.routed_files.length} files`;
+      return `${data.routed_files.length} files${splitSuffix(data)}${timingSuffix(data, id)}`;
     case "hybrid":
-      return `${data.candidates.length} candidates`;
+      return `${data.candidates.length} candidates${splitSuffix(data)}${timingSuffix(data, id)}`;
     case "rerank":
       return data.reranked.length === 0 && data.candidates.length > 0
-        ? `0 of ${data.candidates.length} — no answer found`
-        : `${data.reranked.length} reranked`;
+        ? `0 of ${data.candidates.length} — no answer found${timingSuffix(data, id)}`
+        : `${data.reranked.length} reranked${splitSuffix(data)}${timingSuffix(data, id)}`;
     case "compress":
-      return data.final_chunks.length === 0 ? "nothing to compress" : `${data.final_chunks.length} final chunks`;
+      return data.final_chunks.length === 0
+        ? "nothing to compress"
+        : `${data.final_chunks.length} final chunks${timingSuffix(data, id)}`;
     case "prompt":
       return `${data.final_prompt.length} chars`;
     case "answer":
       if (!data.answer) return null;
-      return data.answer.error ? "failed" : `${data.answer.citations.length} citations`;
+      return (data.answer.error ? "failed" : "answered") + timingSuffix(data, id);
     default:
       return null;
   }
@@ -54,23 +81,8 @@ function RagEmptyStage({ title, children }) {
   );
 }
 
-// Splits answer text on [file:Lstart-Lend] markers so each one renders as a pill inline.
-const CITATION_RE = /\[([^\]:]+):L(\d+)-L(\d+)\]/g;
-
 function AnswerText({ text }) {
-  const parts = [];
-  let last = 0;
-  for (const m of text.matchAll(CITATION_RE)) {
-    if (m.index > last) parts.push(text.slice(last, m.index));
-    parts.push(
-      <span className="rag-cite" key={`${m.index}-${m[0]}`}>
-        {m[1]}:L{m[2]}-L{m[3]}
-      </span>
-    );
-    last = m.index + m[0].length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return <p className="rag-answer__text">{parts}</p>;
+  return <p className="rag-answer__text">{text}</p>;
 }
 
 export function RetrievalStageList({ data, statuses, current, onSelect }) {
@@ -93,6 +105,11 @@ export function RetrievalStageList({ data, statuses, current, onSelect }) {
 }
 
 export function RetrievalSections({ data, visible }) {
+  // Maps each sub-question to a short "Q1"/"Q2" label — only non-empty when the question
+  // was actually decomposed, so route/hybrid/rerank rows can show which part produced
+  // them without repeating the full sub-question text on every row.
+  const subQIndex = new Map((data.sub_questions || []).map((q, i) => [q, i + 1]));
+
   return (
     <Fragment>
       {visible["q-embed"] && (
@@ -107,6 +124,45 @@ export function RetrievalSections({ data, visible }) {
             <span className="rag-callout__label">question</span>
             <p className="rag-mono">&ldquo;{data.question}&rdquo;</p>
           </div>
+          {subQIndex.size > 0 && (
+            <div className="rag-callout">
+              <span className="rag-callout__label">
+                split into {subQIndex.size} independent sub-questions — each retrieved in
+                parallel, merged before compression
+              </span>
+              <ul className="rag-ranked">
+                {data.sub_questions.map((sq, i) => {
+                  const noEvidence = (data.insufficient_sub_questions || []).includes(sq);
+                  const retriedAs = (data.retried_sub_questions || {})[sq];
+                  const recovered = retriedAs && !noEvidence;
+                  return (
+                    <li key={i}>
+                      <span className="rag-ranked__rank">Q{i + 1}</span>
+                      <span className="rag-mono rag-ranked__path">{sq}</span>
+                      {noEvidence && (
+                        <RagTag tone="warn">
+                          {retriedAs ? "no evidence found (after retry)" : "no evidence found"}
+                        </RagTag>
+                      )}
+                      {recovered && <RagTag tone="accent2">recovered via retry</RagTag>}
+                      {retriedAs && (
+                        <p className="rag-hint" style={{ margin: "4px 0 0" }}>
+                          Retried as: &ldquo;{retriedAs}&rdquo;
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+              {data.sufficiency === "partial" && (
+                <p className="rag-hint" style={{ margin: "10px 0 0" }}>
+                  A real answer was still generated from what WAS found — the model was told
+                  explicitly which part had no evidence, so it can state that gap directly
+                  instead of guessing.
+                </p>
+              )}
+            </div>
+          )}
           <RagEmbedding embedding={data.query_embedding} label="query vector" />
           <RagVectorSpace
             {...pointsForFileSpace(data)}
@@ -134,6 +190,11 @@ export function RetrievalSections({ data, visible }) {
               <li key={f.file_path}>
                 <span className="rag-ranked__rank">{i + 1}</span>
                 <span className="rag-mono rag-ranked__path">{f.file_path}</span>
+                {subQIndex.has(f.source_question) && (
+                  <RagTag tone="dim" title={f.source_question}>
+                    Q{subQIndex.get(f.source_question)}
+                  </RagTag>
+                )}
                 <RagScorePill label="score" value={f.score} tone="accent2" />
               </li>
             ))}
@@ -163,6 +224,13 @@ export function RetrievalSections({ data, visible }) {
                 ["bm25", c.bm25_score],
                 ["fused", c.fused_score, "accent"],
               ]}
+              badge={
+                subQIndex.has(c.source_question) && (
+                  <RagTag tone="dim" title={c.source_question}>
+                    Q{subQIndex.get(c.source_question)}
+                  </RagTag>
+                )
+              }
             />
           ))}
         </RagSection>
@@ -202,7 +270,18 @@ export function RetrievalSections({ data, visible }) {
             </RagEmptyStage>
           ) : (
             data.reranked.map((r) => (
-              <RagChunkCard key={r.chunk.id} chunk={r.chunk} scores={[["rerank", r.rerank_score, "accent"]]} />
+              <RagChunkCard
+                key={r.chunk.id}
+                chunk={r.chunk}
+                scores={[["rerank", r.rerank_score, "accent"]]}
+                badge={
+                  subQIndex.has(r.source_question) && (
+                    <RagTag tone="dim" title={r.source_question}>
+                      Q{subQIndex.get(r.source_question)}
+                    </RagTag>
+                  )
+                }
+              />
             ))
           )}
         </RagSection>
@@ -311,51 +390,17 @@ export function RetrievalSections({ data, visible }) {
           id="answer"
           num="7"
           title="LLM answer"
-          description="The prompt above, sent to the answer model. Citations are parsed back to the chunks they came from — an uncited claim is ungrounded by construction."
-          plain="The AI reads the trimmed code and writes the answer, tagging each statement with the exact file and lines it came from — so you can check every claim against the source instead of trusting it."
+          description="The prompt above, sent to the answer model, produces this answer."
+          plain="The AI reads the trimmed code and writes the answer in plain prose."
         >
           {data.answer.error ? (
             <p className="rag-error">{data.answer.error}</p>
           ) : (
-            <Fragment>
-              <div className="rag-stat-row">
-                <div className="rag-stat rag-stat--accent">
-                  <span className="rag-stat__n">{data.answer.citations.length}</span>
-                  <span className="rag-stat__l">citations resolved</span>
-                </div>
-                <div className="rag-stat">
-                  <span className="rag-stat__n">{data.answer.confidence.toFixed(2)}</span>
-                  <span className="rag-stat__l">confidence</span>
-                </div>
-              </div>
-              <div className="rag-answer">
-                <span className="rag-callout__label">answer</span>
-                <AnswerText text={data.answer.text} />
-                <span className="rag-answer__model">{data.answer.model}</span>
-              </div>
-              {data.answer.citations.length === 0 ? (
-                <p className="rag-hint">
-                  No citation markers resolved to a retrieved chunk — either the model found no
-                  answer in the code, or it cited a location that was not in the prompt.
-                </p>
-              ) : (
-                <Fragment>
-                  <p className="rag-hint">Each citation, resolved back to its source lines:</p>
-                  {data.answer.citations.map((c, i) => (
-                    <div className="rag-chunk" key={`${c.file_path}-${c.start_line}-${i}`}>
-                      <div className="rag-chunk__head">
-                        <span className="rag-chunk__loc">
-                          {c.file_path}:L{c.start_line}-L{c.end_line}
-                        </span>
-                      </div>
-                      <div className="rag-chunk__body">
-                        <RagCode code={c.snippet} startLine={c.start_line} />
-                      </div>
-                    </div>
-                  ))}
-                </Fragment>
-              )}
-            </Fragment>
+            <div className="rag-answer">
+              <span className="rag-callout__label">answer</span>
+              <AnswerText text={data.answer.text} />
+              <span className="rag-answer__model">{data.answer.model}</span>
+            </div>
           )}
         </RagSection>
       )}

@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from src.api.chat_routes import router as chat_router
+from src.api.insights_routes import router as insights_router
 from src.api.routes import pipeline, router
 from src.config import settings
 
@@ -50,6 +51,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(chat_router)
+app.include_router(insights_router)
 
 
 @app.exception_handler(Exception)

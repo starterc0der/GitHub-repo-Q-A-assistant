@@ -36,8 +36,12 @@ export function ConfirmDialog({ title, message, confirmLabel = "Delete", onConfi
   );
 }
 
-export function RagTag({ children, tone }) {
-  return <span className={cls("rag-tag", tone && `rag-tag--${tone}`)}>{children}</span>;
+export function RagTag({ children, tone, title }) {
+  return (
+    <span className={cls("rag-tag", tone && `rag-tag--${tone}`)} title={title}>
+      {children}
+    </span>
+  );
 }
 
 export function RagScorePill({ label, value, tone }) {

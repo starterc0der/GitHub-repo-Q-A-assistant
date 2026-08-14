@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import random
+from collections.abc import Iterator
 
 import requests
 
@@ -19,8 +21,8 @@ class LLMClient:
     OpenRouter, Together, DeepSeek and others all serve this shape, so switching provider
     is a change of LLM_BASE_URL rather than a change of code.
 
-    Callers depend on two things: complete() returns a string, and every failure is a
-    RuntimeError they can catch to degrade gracefully.
+    Callers depend on two things: complete()/stream() return/yield text, and every
+    failure is a RuntimeError they can catch to degrade gracefully.
     """
 
     def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120,
@@ -30,16 +32,52 @@ class LLMClient:
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
+        # Side-channel so callers (rewriter, decomposer, ...) don't need their return
+        # signatures changed — Pipeline reads this right after each call instead.
+        self.last_usage: dict[str, int] | None = None
 
     def complete(
         self, prompt: str, system: str | None = None, history: list[tuple[str, str]] | None = None
     ) -> str:
-        messages = (
+        payload = {
+            "model": self.model, "messages": self._build_messages(prompt, system, history),
+            "max_tokens": MAX_TOKENS,
+        }
+        response = self._post_with_retry(payload)
+        body = response.json()
+        self.last_usage = body.get("usage")
+        return self._extract_text(body)
+
+    def stream(
+        self, prompt: str, system: str | None = None, history: list[tuple[str, str]] | None = None
+    ) -> Iterator[str]:
+        """Same request as complete(), but yields text deltas as they arrive instead of
+        waiting for the full response. The retry ladder in _post_with_retry only covers
+        the connection attempt — once tokens have started arriving, a dropped stream
+        raises immediately rather than retrying, since a partial generation can't be
+        cleanly resumed without risking duplicated or garbled text."""
+        self.last_usage = None
+        payload = {
+            "model": self.model, "messages": self._build_messages(prompt, system, history),
+            "max_tokens": MAX_TOKENS, "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        response = self._post_with_retry(payload)
+        yield from self._iter_deltas(response)
+
+    def _build_messages(
+        self, prompt: str, system: str | None, history: list[tuple[str, str]] | None
+    ) -> list[dict]:
+        return (
             ([{"role": "system", "content": system}] if system else [])
             + [{"role": role, "content": content} for role, content in (history or [])]
             + [{"role": "user", "content": prompt}]
         )
-        payload = {"model": self.model, "messages": messages, "max_tokens": MAX_TOKENS}
+
+    def _post_with_retry(self, payload: dict) -> requests.Response:
+        """Retries connection failures and retryable HTTP statuses (429/5xx) with
+        backoff; raises RuntimeError for anything else. The caller reads the body —
+        once, or (payload["stream"]) incrementally — this only gets a usable response."""
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -48,7 +86,8 @@ class LLMClient:
             check()
             try:
                 response = requests.post(
-                    self.url, headers=headers, json=payload, timeout=self.timeout
+                    self.url, headers=headers, json=payload,
+                    timeout=self.timeout, stream=payload.get("stream", False),
                 )
             except requests.RequestException as exc:
                 # A read timeout or connection drop is usually transient (a momentarily
@@ -74,7 +113,10 @@ class LLMClient:
 
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt == self.max_retries - 1:
-                    break
+                    raise RuntimeError(
+                        f"LLM still failing after {self.max_retries} attempts ({self.model}): "
+                        f"{response.status_code} {response.text[:200]}"
+                    )
                 delay = self._retry_delay(response, attempt)
                 logger.warning(
                     "%s %s (%s), retrying in %.1fs [%d/%d]",
@@ -88,12 +130,39 @@ class LLMClient:
                 raise RuntimeError(
                     f"LLM call failed ({self.model}): {response.status_code} {response.text[:200]}"
                 )
-            return self._extract_text(response.json())
+            return response
 
-        raise RuntimeError(
-            f"LLM still failing after {self.max_retries} attempts ({self.model}): "
-            f"{response.status_code} {response.text[:200]}"
-        )
+        raise RuntimeError(f"LLM still failing after {self.max_retries} attempts ({self.model})")
+
+    def _iter_deltas(self, response: requests.Response) -> Iterator[str]:
+        """Parses an OpenAI-style SSE stream (`data: {...}` lines, ending in
+        `data: [DONE]`) into text deltas."""
+        got_any = False
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                check()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    continue
+                if chunk.get("usage"):
+                    self.last_usage = chunk["usage"]
+                try:
+                    delta = chunk["choices"][0]["delta"].get("content")
+                except (KeyError, IndexError):
+                    continue
+                if delta:
+                    got_any = True
+                    yield delta
+        except requests.RequestException as exc:
+            if got_any:
+                raise RuntimeError(f"Stream from {self.model} dropped mid-answer: {exc}") from exc
+            raise RuntimeError(f"Could not reach {self.url} ({self.model}): {exc}") from exc
 
     def _is_daily_quota(self, response: requests.Response) -> bool:
         text = response.text.lower()

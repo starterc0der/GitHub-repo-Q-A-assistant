@@ -2,66 +2,48 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterator
+from dataclasses import dataclass
 
 from src.index.schema import CodeChunk
 from src.llm_client import LLMClient
 
-# Normally one range per bracket ([path:L1-L5]), but models sometimes group several
-# ranges for the same file into one bracket ([path:L1-L5, L9-L12]) despite the prompt
-# asking for one marker per claim, drop the range entirely for a single-row citation
-# ([path:L5]), or — citing two different sources for one claim — join separate
-# path:range groups with "; " in one bracket ([pathA:L1-L5; pathB:L9-L12], common once
-# a PDF/DOCX "path" is itself "name · p.N" and two pages support the same sentence).
-# BRACKET_PATTERN grabs the whole bracket; GROUP_PATTERN then splits it into one or
-# more (path, ranges) pairs; RANGE_PATTERN accepts both range shapes above.
-BRACKET_PATTERN = re.compile(r"\[([^\[\]]+)\]")
-GROUP_PATTERN = re.compile(r"([^:;]+):(L\d+(?:-L\d+)?(?:\s*,\s*L\d+(?:-L\d+)?)*)")
-RANGE_PATTERN = re.compile(r"L(\d+)(?:-L(\d+))?")
 CHART_PATTERN = re.compile(r"```chart\s*\n(.*?)\n```", re.DOTALL)
 
 SYSTEM_PROMPT = (
-    "Answer only from the code chunks in the user message — that is your entire world; "
+    "Answer only from the source material in the user message — that is your entire world; "
     "never use outside knowledge of similar projects, libraries, or conventions.\n"
     "\n"
     "Rules:\n"
-    "1. Every claim must cite its source: [file_path:Lstart-Lend], exact and verbatim from "
-    "the chunk headers — one marker per claim, never invent or round a path/line. If you "
-    "cannot cite a line, do not write the claim.\n"
-    "2. If the chunks do not answer the question, say so and stop — do not pad with unrelated "
-    "code. Distinguish: (a) about this repo but not covered here — name the file/function you "
-    "would need; (b) not about this repo at all — say so, never answer from general knowledge. "
-    "Same if no chunks were given at all. A refusal is a correct answer; a guess is a failure.\n"
-    "3. Partial coverage gets a partial answer, with what is unsupported stated explicitly.\n"
-    "4. Chunks are excerpts — absence here means unknown, not absent from the repo. Never say "
-    "something is missing or does not exist just because it is not in front of you.\n"
-    "5. Describe only what the code visibly does — never infer behavior from a name or assumed "
-    "convention. Mark any inference explicitly; never blend it into a cited claim.\n"
-    "6. Match names — functions, files, identifiers — character for character.\n"
-    "7. Only if the question asks for a comparison or graph AND the chunks contain comparable "
-    "numeric values, START your answer with a fenced ```chart block (before any prose) of "
-    'this exact JSON shape: {"title":"...","categories":["..."],"series":[{"name":"...",'
-    '"values":[...]}]}. values must be plain numbers, one per category, same order. Put it '
-    "first so it is never cut off by a long explanation. Omit it entirely otherwise — most "
+    "1. If the source material does not answer the question, say so and stop — do not pad "
+    "with unrelated content. Distinguish: (a) about this repo but not covered here — name the "
+    "file/function you would need; (b) not about this repo at all — say so, never answer from "
+    "general knowledge. Same if no source material was given at all. A refusal is a correct "
+    "answer; a guess is a failure.\n"
+    "2. Partial coverage gets a partial answer, with what is unsupported stated explicitly.\n"
+    "3. The source material is excerpts — absence here means unknown, not absent from the "
+    "repo. Never say something is missing or does not exist just because it is not in front "
+    "of you.\n"
+    "4. Describe only what is visibly stated — never infer behavior from a name or assumed "
+    "convention. Mark any inference explicitly, never blend it into a stated fact.\n"
+    "5. Match names — functions, files, identifiers — character for character.\n"
+    "6. Only if the question asks for a comparison or graph AND the source material contains "
+    "comparable numeric values, START your answer with a fenced ```chart block (before any "
+    'prose) of this exact JSON shape: {"title":"...","categories":["..."],"series":[{"name":'
+    '"...","values":[...]}]}. values must be plain numbers, one per category, same order. Put '
+    "it first so it is never cut off by a long explanation. Omit it entirely otherwise — most "
     "questions don't need one.\n"
     "\n"
-    "Be concise and concrete, no preamble."
+    "Do not cite file paths or line numbers, and never refer to \"chunks\", \"excerpts\", "
+    "\"the provided text/context\", or how this material reached you — the reader never sees "
+    "any of that. Answer in plain, natural prose, as if you simply knew the answer. Be concise "
+    "and concrete, no preamble."
 )
-
-
-@dataclass
-class Citation:
-    file_path: str
-    start_line: int
-    end_line: int
-    snippet: str
 
 
 @dataclass
 class Answer:
     text: str
-    citations: list[Citation] = field(default_factory=list)
-    confidence: float = 1.0
     chart: dict | None = None
 
 
@@ -109,68 +91,51 @@ class ChartParser:
         }
 
 
-class CitationParser:
-    """Extracts [file:Lstart-Lend] markers from LLM output and matches them to chunks."""
-
-    def parse(self, text: str, chunks: list[CodeChunk]) -> list[Citation]:
-        citations = []
-        for bracket in BRACKET_PATTERN.findall(text):
-            for file_path, ranges in GROUP_PATTERN.findall(bracket):
-                file_path = file_path.strip()
-                for start_str, end_str in RANGE_PATTERN.findall(ranges):
-                    start_line = int(start_str)
-                    end_line = int(end_str) if end_str else start_line
-                    chunk = self._find_chunk(file_path, start_line, chunks)
-                    if chunk is None:
-                        continue
-                    citations.append(
-                        Citation(
-                            file_path=file_path,
-                            start_line=start_line,
-                            end_line=end_line,
-                            snippet=self._extract_snippet(chunk, start_line, end_line),
-                        )
-                    )
-        return citations
-
-    def _find_chunk(
-        self, file_path: str, start_line: int, chunks: list[CodeChunk]
-    ) -> CodeChunk | None:
-        for chunk in chunks:
-            if chunk.file_path == file_path and chunk.start_line <= start_line <= chunk.end_line:
-                return chunk
-        return None
-
-    def _extract_snippet(self, chunk: CodeChunk, start_line: int, end_line: int) -> str:
-        lines = chunk.code.splitlines()
-        offset = max(0, start_line - chunk.start_line)
-        count = max(1, end_line - start_line + 1)
-        return "\n".join(lines[offset : offset + count])
-
-
 class AnswerGenerator:
-    """Turns retrieved chunks + a question into a cited, grounded answer."""
+    """Turns retrieved chunks + a question into a grounded answer."""
 
-    def __init__(
-        self, llm: LLMClient, citation_parser: CitationParser, chart_parser: ChartParser | None = None
-    ):
+    def __init__(self, llm: LLMClient, chart_parser: ChartParser | None = None):
         self.llm = llm
-        self.citation_parser = citation_parser
         self.chart_parser = chart_parser or ChartParser()
 
     def answer(
-        self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None
+        self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None,
+        insufficient: list[str] | None = None,
     ) -> Answer:
-        prompt = self.build_prompt(question, chunks)
+        prompt = self.build_prompt(question, chunks, insufficient)
         text = self.llm.complete(prompt, system=SYSTEM_PROMPT, history=history)
-        text, chart = self.chart_parser.extract(text)
-        citations = self.citation_parser.parse(text, chunks)
-        confidence = 1.0 if citations else 0.3
-        return Answer(text=text, citations=citations, confidence=confidence, chart=chart)
+        return self.finalize(text)
 
-    def build_prompt(self, question: str, chunks: list[CodeChunk]) -> str:
+    def answer_stream(
+        self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None,
+        insufficient: list[str] | None = None,
+    ) -> Iterator[str]:
+        """Yields raw text deltas as they arrive. Chart extraction needs the complete
+        text (it's a fenced block, not parseable mid-stream), so callers should
+        accumulate the deltas and call finalize() once the stream ends."""
+        prompt = self.build_prompt(question, chunks, insufficient)
+        yield from self.llm.stream(prompt, system=SYSTEM_PROMPT, history=history)
+
+    def finalize(self, text: str) -> Answer:
+        text, chart = self.chart_parser.extract(text)
+        return Answer(text=text, chart=chart)
+
+    def build_prompt(
+        self, question: str, chunks: list[CodeChunk], insufficient: list[str] | None = None
+    ) -> str:
         context = "\n\n".join(
             f"[{chunk.file_path}:L{chunk.start_line}-L{chunk.end_line}]\n{chunk.code}"
             for chunk in chunks
         )
-        return f"Code chunks:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+        # Named explicitly rather than left for the model to notice mid-answer: retrieval
+        # already knows which part of a compound question came back empty (each
+        # sub-question's own rerank gate), so state it as a fact instead of hoping the
+        # model discovers the gap in its own writing.
+        note = ""
+        if insufficient:
+            parts = "; ".join(f'"{q}"' for q in insufficient)
+            note = (
+                f"\n\nNote: no supporting evidence was found for: {parts}. State that gap "
+                "plainly, in your own words — never as \"the chunks/excerpts don't mention...\"."
+            )
+        return f"Source material:\n{context}\n\nQuestion: {question}{note}\n\nAnswer:"

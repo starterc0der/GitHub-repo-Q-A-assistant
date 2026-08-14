@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS messages (
   standalone_question TEXT,
   cache_hit INTEGER NOT NULL DEFAULT 0,
   cached_from TEXT,
+  cache_kind TEXT,
+  cache_match_question TEXT,
+  cache_match_score REAL,
   trace TEXT,
   chart TEXT,
   created_at TEXT NOT NULL,
@@ -104,6 +107,10 @@ def init_db(db_path: str) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
         if "chart" not in columns:
             conn.execute("ALTER TABLE messages ADD COLUMN chart TEXT")
+        if "cache_kind" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN cache_kind TEXT")
+            conn.execute("ALTER TABLE messages ADD COLUMN cache_match_question TEXT")
+            conn.execute("ALTER TABLE messages ADD COLUMN cache_match_score REAL")
         # SQLite can't ALTER a CHECK constraint — recreate the table to widen 'kind'.
         sources_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'"

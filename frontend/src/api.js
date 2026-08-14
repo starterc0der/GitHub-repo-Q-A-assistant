@@ -83,7 +83,48 @@ export const listMessages = (chatId) => request(`/chats/${chatId}/messages`);
 export const messageTrace = (id) => request(`/messages/${id}/trace`);
 export const messageVectors = (id) => request(`/messages/${id}/vectors`);
 
-// signal: an AbortController signal — aborting closes the fetch, which the backend
-// detects via request.is_disconnected() and uses to cancel in-flight LLM calls.
-export const sendMessage = (chatId, content, signal) =>
-  post(`/chats/${chatId}/messages`, { content }, { signal });
+// ----------------------------------------------------------------- insights
+
+export const spaceInsights = (spaceId) => request(`/spaces/${spaceId}/insights`);
+export const chatInsights = (spaceId, chatId) => request(`/spaces/${spaceId}/chats/${chatId}/insights`);
+export const chunkInsights = (spaceId) => request(`/spaces/${spaceId}/insights/chunks`);
+
+// POST + a streamed fetch body: EventSource can't send a POST body, so SSE frames are
+// parsed by hand here instead. signal: an AbortController signal — aborting closes the
+// fetch, which the backend detects via request.is_disconnected() and uses to cancel
+// in-flight LLM calls. onDelta fires per text chunk as the answer streams in; the
+// resolved value is the final persisted message (or null if the stream ended without a
+// "done" event, e.g. cancellation — the caller's own refetch is the source of truth then).
+export async function sendMessage(chatId, content, signal, onDelta) {
+  const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+    signal,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`send message failed (${res.status}): ${text}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let message = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop(); // last piece may be a partial frame — kept for the next read
+    for (const frame of frames) {
+      if (!frame.startsWith("data: ")) continue;
+      const event = JSON.parse(frame.slice("data: ".length));
+      if (event.type === "delta") onDelta?.(event.text);
+      else if (event.type === "done") message = event.message;
+      else if (event.type === "error") throw new Error(event.message);
+    }
+  }
+  return message;
+}

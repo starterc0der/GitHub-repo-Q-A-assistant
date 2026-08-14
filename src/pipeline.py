@@ -1,19 +1,25 @@
 from __future__ import annotations
 
+import contextvars
 import logging
+import math
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Generator, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.cancellation import Cancelled, check
 from src.config import Settings
-from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator, CitationParser
+from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator
+from src.generate.decomposer import QueryDecomposer
+from src.generate.faithfulness import FaithfulnessChecker, FaithfulnessResult
 from src.generate.intent import BroadIntentClassifier, matches_broad_keywords
 from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
 from src.index.doc_index import DocIndex
 from src.index.embedder import Embedder
+from src.index.qa_cache_index import QaCacheIndex
 from src.index.schema import CodeChunk, FileSummary
 from src.index.vector_store import VectorStore
 from src.ingest.ast_chunker import ASTChunker
@@ -25,12 +31,11 @@ from src.ingest.summarizer import Summarizer
 from src.llm_client import LLMClient
 from src.retrieve.compressor import Compressor
 from src.retrieve.cross_reranker import CrossReranker
-from src.retrieve.hybrid_search import HybridSearch, RankFuser
+from src.retrieve.hybrid_search import HybridSearch, RankFuser, ScoredChunk
 from src.retrieve.router import Router
 from src.trace import (
     AnswerTrace,
     ChunkTrace,
-    CitationTrace,
     CloneTrace,
     CompressedChunkTrace,
     FileTrace,
@@ -51,12 +56,66 @@ logger = logging.getLogger(__name__)
 README_NAMES = ("README.md", "README.rst", "README.txt", "README")
 
 
+def _add_usage(totals: dict[str, int], usage: dict | None) -> None:
+    if not usage:
+        return
+    totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0)
+    totals["completion_tokens"] = totals.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+
+
 @dataclass
 class IngestReport:
     source_id: str
     name: str
     file_count: int
     chunk_count: int
+
+
+@dataclass
+class _CandidateState:
+    """Stages 1-4 (embed→route→hybrid→rerank) for ONE (sub-)question — split out so
+    query decomposition can run this once per sub-question, in parallel, before the
+    merge step and the shared compress/generate stages that follow."""
+
+    query_vector: list[float]
+    routed: list[tuple[str, str, float]]
+    scored_candidates: list[ScoredChunk]
+    reranked_scored: list[tuple[CodeChunk, float]]
+    # ms per stage: embed, route, hybrid, rerank.
+    timings: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class _RetrievalState:
+    """Everything route→hybrid→rerank→compress produced — enough to run generation
+    (blocking or streaming) and, once the answer text is known, build the QueryTrace."""
+
+    query_vector: list[float]
+    routed: list[tuple[str, str, float]]
+    scored_candidates: list[ScoredChunk]
+    reranked_scored: list[tuple[CodeChunk, float]]
+    final_chunks: list[CodeChunk]
+    final_chunk_traces: list[CompressedChunkTrace]
+    wide_fallback: bool
+    wide_fallback_reason: str
+    too_large_message: str | None
+    # Empty unless the question was decomposed; source_question maps below are then keyed
+    # by file_path (routed) or chunk.id (candidate/reranked) -> which sub-question won it.
+    sub_questions: list[str] = field(default_factory=list)
+    routed_origin: dict[str, str] = field(default_factory=dict)
+    candidate_origin: dict[str, str] = field(default_factory=dict)
+    reranked_origin: dict[str, str] = field(default_factory=dict)
+    # ms per stage (embed/route/hybrid/rerank from candidate, plus decompose/gate/compress
+    # added here) and cumulative {prompt_tokens, completion_tokens} across the LLM calls
+    # this retrieval made (decompose, broad-intent if it fired, compress).
+    timings: dict[str, float] = field(default_factory=dict)
+    tokens: dict[str, int] = field(default_factory=dict)
+    sufficiency: str = "sufficient"
+    insufficient_sub_questions: list[str] = field(default_factory=list)
+    # original sub-question -> its retry rewrite, for every insufficient sub-question that
+    # got one retry attempt (whether or not the retry found anything). Empty unless at
+    # least one sub-question was insufficient after the first pass. See Pipeline._retrieve.
+    retried_sub_questions: dict[str, str] = field(default_factory=dict)
 
 
 class Pipeline:
@@ -86,16 +145,20 @@ class Pipeline:
         bulk_llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_bulk_model)
         llm = LLMClient(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
         self.bulk_llm = bulk_llm
+        self.llm = llm
 
         self.summarizer = Summarizer(bulk_llm)
         self.contextualizer = Contextualizer(bulk_llm)
         self.rewriter = StandaloneRewriter(bulk_llm)
         self.intent_classifier = BroadIntentClassifier(bulk_llm)
+        self.decomposer = QueryDecomposer(bulk_llm, settings.max_subquestions)
+        self.faithfulness_checker = FaithfulnessChecker(bulk_llm)
 
         self.embedder = Embedder(settings.embedding_model)
         store = VectorStore(settings.qdrant_url)
         self.chunk_index = ChunkIndex(store)
         self.doc_index = DocIndex(store)
+        self.qa_cache_index = QaCacheIndex(store)
 
         self.router = Router(self.embedder, self.doc_index)
         self.hybrid_search = HybridSearch(
@@ -105,7 +168,7 @@ class Pipeline:
         )
         self.cross_reranker = CrossReranker(settings.reranker_model, settings.rerank_min_top_score)
         self.compressor = Compressor(llm)
-        self.answer_generator = AnswerGenerator(llm, CitationParser())
+        self.answer_generator = AnswerGenerator(llm)
 
     @staticmethod
     def default_source_name(url: str) -> str:
@@ -349,6 +412,14 @@ class Pipeline:
     def delete_space(self, space_id: str) -> None:
         self.chunk_index.delete_space(space_id)
         self.doc_index.delete_space(space_id)
+        self.qa_cache_index.delete_space(space_id)
+
+    def invalidate_qa_cache(self, space_id: str) -> None:
+        """A source finishing ingest or being removed can change the answer to any
+        question in this space — called alongside the SQLite `qa_cache` wipe at both call
+        sites (ingest completion, source deletion) so the semantic-cache vectors don't
+        outlive the exact-match rows they're supposed to mirror."""
+        self.qa_cache_index.delete_space(space_id)
 
     # ----------------------------------------------------------------- query
 
@@ -388,6 +459,33 @@ class Pipeline:
     def answer_meta(self, question: str, history: list[tuple[str, str]]) -> str:
         return self.bulk_llm.complete(question, system=self.META_CHAT_SYSTEM_PROMPT, history=history)
 
+    def semantic_cache_lookup(self, space_id: str, question: str) -> tuple[str, str, float] | None:
+        """Called only on an exact-match cache MISS (see chat_routes._cache_lookup):
+        embeds `question` locally (no LLM call) and finds the closest previously-cached
+        turn-1 question in this space. Applies settings.semantic_cache_min_score itself —
+        "how conservative" is a policy decision that belongs with the setting, not left to
+        every caller to remember. Returns (message_id, matched_question, score), or None
+        if nothing is close enough (including "nothing cached yet")."""
+        vector = self.embedder.embed_one(question)
+        self.qa_cache_index.ensure(self.embedder.dim)
+        best = self.qa_cache_index.search_best(vector, space_id)
+        if best is None or best[2] < self.settings.semantic_cache_min_score:
+            return None
+        return best
+
+    def semantic_cache_put(self, space_id: str, question_hash: str, question: str, message_id: str) -> None:
+        vector = self.embedder.embed_one(question)
+        self.qa_cache_index.ensure(self.embedder.dim)
+        self.qa_cache_index.upsert(space_id, question_hash, question, message_id, vector)
+
+    def check_faithfulness(
+        self, question: str, answer_text: str, chunks: list[CodeChunk]
+    ) -> FaithfulnessResult:
+        """Not called on the live chat path — eval-only for now (see evals/runner.py).
+        One extra bulk-LLM call; wiring it into chat_routes.py per-message is a separate
+        cost/latency decision, not something this method decides on its own."""
+        return self.faithfulness_checker.check(question, answer_text, chunks)
+
     def _wide_fallback_chunks(self, space_id: str, source_ids: list[str]) -> list[CodeChunk]:
         """Every chunk in the routed source(s), whole — for a question no single chunk can
         answer on its own (e.g. "summarize this"). Scoped to whole SOURCES rather than the
@@ -408,37 +506,408 @@ class Pipeline:
 
     def _answer_trace(
         self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None,
-        empty_message: str | None = None,
+        empty_message: str | None = None, insufficient: list[str] | None = None,
     ) -> AnswerTrace:
         """The answer call, wrapped so a failed generation still returns a viewable trace —
         every retrieval stage before it succeeded and is worth showing."""
         if not chunks:
-            return AnswerTrace(
-                text=empty_message or self.NO_MATCH, confidence=0.0, model=self.settings.llm_model
-            )
+            return AnswerTrace(text=empty_message or self.NO_MATCH, model=self.settings.llm_model)
         check()
         try:
-            answer = self.answer_generator.answer(question, chunks, history=history)
+            answer = self.answer_generator.answer(question, chunks, history=history, insufficient=insufficient)
         except RuntimeError as exc:
-            # confidence=0: AnswerTrace defaults to 1.0, which would render a failed
-            # answer as a confident one.
-            return AnswerTrace(
-                text="", confidence=0.0, model=self.settings.llm_model, error=str(exc)
+            return AnswerTrace(text="", model=self.settings.llm_model, error=str(exc))
+        return AnswerTrace(text=answer.text, model=self.settings.llm_model, chart=answer.chart)
+
+    def _retrieve_candidates(self, question: str, space_id: str) -> _CandidateState:
+        """Stages 1-4: embed→route→hybrid search→cross-rerank, for ONE question. Called
+        once directly, or once per sub-question (in parallel) when the question was
+        decomposed — see _retrieve()."""
+        started = time.monotonic()
+        timings: dict[str, float] = {}
+        stage_started = started
+
+        def done(step: str, key: str, detail: str) -> None:
+            nonlocal stage_started
+            now = time.monotonic()
+            timings[key] = (now - stage_started) * 1000
+            logger.info("  [%s] %r %s (%.1fs elapsed)", step, question, detail, now - started)
+            stage_started = now
+
+        query_vector = self.embedder.embed_one(question)
+        done("1/6 embed", "embed", f"{len(query_vector)}d query vector")
+
+        routed = self.router.route_to_files_scored(
+            question, space_id, self.settings.top_files, query_vector=query_vector
+        )
+        file_paths = [file_path for file_path, _source_id, _score in routed]
+        done("2/6 route", "route", f"{len(routed)} files shortlisted")
+
+        scored_candidates = self.hybrid_search.search_scored(
+            question, space_id, file_paths, self.settings.hybrid_candidate_k,
+            query_vector=query_vector,
+        )
+        candidate_chunks = [sc.chunk for sc in scored_candidates]
+        done("3/6 hybrid", "hybrid", f"{len(candidate_chunks)} candidates")
+
+        reranked_scored = self.cross_reranker.rerank_scored(
+            question, candidate_chunks, self.settings.rerank_top_k
+        )
+        done(
+            "4/6 rerank", "rerank",
+            f"{len(reranked_scored)} kept of {len(candidate_chunks)}"
+            + ("" if reranked_scored else " — top score below gate"),
+        )
+        return _CandidateState(query_vector, routed, scored_candidates, reranked_scored, timings)
+
+    def _merge_candidates(
+        self, sub_questions: list[str], states: list[_CandidateState]
+    ) -> tuple[_CandidateState, dict[str, str], dict[str, str], dict[str, str]]:
+        """Combines N independent candidate states (one per sub-question) into one.
+        Routed files and hybrid candidates are unioned, best score wins. Reranked chunks
+        take a fair share from EACH sub-question's own top-k instead of a flat top-k over
+        pooled scores — cross-encoder scores aren't comparable across different queries,
+        so pooling them would just reflect which sub-question happened to score "louder",
+        silently dropping a whole sub-topic's chunks before compression ever sees them.
+
+        Returns the merged state plus origin maps (file_path / chunk.id -> the winning
+        sub-question) purely for the trace — retrieval itself doesn't need them."""
+        if len(states) == 1:
+            return states[0], {}, {}, {}
+
+        query_vector = [sum(vals) / len(states) for vals in zip(*(s.query_vector for s in states))]
+
+        routed_best: dict[str, tuple[str, str, float]] = {}
+        routed_origin: dict[str, str] = {}
+        for sub_q, state in zip(sub_questions, states):
+            for file_path, source_id, score in state.routed:
+                if file_path not in routed_best or score > routed_best[file_path][2]:
+                    routed_best[file_path] = (file_path, source_id, score)
+                    routed_origin[file_path] = sub_q
+        routed = sorted(routed_best.values(), key=lambda r: r[2], reverse=True)
+
+        candidate_best: dict[str, ScoredChunk] = {}
+        candidate_origin: dict[str, str] = {}
+        for sub_q, state in zip(sub_questions, states):
+            for sc in state.scored_candidates:
+                if sc.chunk.id not in candidate_best or sc.fused_score > candidate_best[sc.chunk.id].fused_score:
+                    candidate_best[sc.chunk.id] = sc
+                    candidate_origin[sc.chunk.id] = sub_q
+        scored_candidates = sorted(candidate_best.values(), key=lambda sc: sc.fused_score, reverse=True)
+
+        share = math.ceil(self.settings.rerank_top_k / len(states))
+        reranked_best: dict[str, tuple[CodeChunk, float]] = {}
+        reranked_origin: dict[str, str] = {}
+        for sub_q, state in zip(sub_questions, states):
+            for chunk, score in state.reranked_scored[:share]:
+                if chunk.id not in reranked_best or score > reranked_best[chunk.id][1]:
+                    reranked_best[chunk.id] = (chunk, score)
+                    reranked_origin[chunk.id] = sub_q
+        reranked_scored = sorted(reranked_best.values(), key=lambda cs: cs[1], reverse=True)
+
+        # Branches ran concurrently, so each stage's real contribution to wall-clock time
+        # is however long the SLOWEST branch took at that stage, not the sum of all of them.
+        timings = {
+            key: max(s.timings.get(key, 0.0) for s in states)
+            for key in ("embed", "route", "hybrid", "rerank")
+        }
+
+        merged = _CandidateState(query_vector, routed, scored_candidates, reranked_scored, timings)
+        return merged, routed_origin, candidate_origin, reranked_origin
+
+    def _finish_retrieval(
+        self, question: str, space_id: str, candidate: _CandidateState, sub_questions: list[str],
+        routed_origin: dict[str, str], candidate_origin: dict[str, str],
+        reranked_origin: dict[str, str], started: float,
+    ) -> _RetrievalState:
+        """Stages 5-6: broad-intent gate, then compress (or whole-source wide fallback).
+        Runs once against the ORIGINAL question and the merged candidate/rerank lists —
+        sub-questions exist only to fix retrieval; generation answers what was actually
+        asked, not each fragment separately."""
+        # Only the top-scoring source(s), not every source with even one weak match —
+        # candidate.routed is score-descending, so routed[0] is the best.
+        routed_source_ids: list[str] = []
+        if candidate.routed:
+            top_score = candidate.routed[0][2]
+            routed_source_ids = list(dict.fromkeys(
+                source_id for _fp, source_id, score in candidate.routed if score == top_score
+            ))
+
+        check()
+        timings: dict[str, float] = dict(candidate.timings)
+        tokens: dict[str, int] = {}
+        gate_started = time.monotonic()
+        reranked_chunks = [chunk for chunk, _ in candidate.reranked_scored]
+        final_chunk_traces: list[CompressedChunkTrace] = []
+        final_chunks: list[CodeChunk] = []
+        wide_fallback = False
+        wide_reason = ""
+        too_large_message: str | None = None
+
+        # Three ways into the wide path, cheapest first — see BroadIntentClassifier's
+        # docstring for why the LLM tier only fires on the genuinely ambiguous case.
+        route_top_score = candidate.routed[0][2] if candidate.routed else 0.0
+        if not reranked_chunks and route_top_score < self.settings.route_min_top_score:
+            # Off-topic, not broad — skip the wide attempt so this reports NO_MATCH
+            # instead of a "too large, be more specific" refusal.
+            logger.info(
+                "  [5/6 compress] no reranked chunks, route top score %.3f < %.3f — no match",
+                route_top_score, self.settings.route_min_top_score,
             )
-        return AnswerTrace(
-            text=answer.text,
-            citations=[
-                CitationTrace(
-                    file_path=c.file_path,
-                    start_line=c.start_line,
-                    end_line=c.end_line,
-                    snippet=c.snippet,
+        elif not reranked_chunks:
+            wide_fallback, wide_reason = True, "no chunk answered this on its own"
+        elif matches_broad_keywords(question):
+            wide_fallback, wide_reason = True, "question language implies broad coverage"
+        else:
+            # Assigned regardless of the verdict — the call (and its cost) happens
+            # either way, unlike the two free/local checks above.
+            self.bulk_llm.last_usage = None
+            is_broad = self.intent_classifier.is_broad(question)
+            _add_usage(tokens, self.bulk_llm.last_usage)
+            if is_broad:
+                wide_fallback, wide_reason = True, "classified as a broad-coverage question"
+        timings["gate"] = (time.monotonic() - gate_started) * 1000
+
+        if not wide_fallback:
+            logger.info("  [5/6 compress] %d chunks in one batched call", len(reranked_chunks))
+            self.llm.last_usage = None
+            compress_started = time.monotonic()
+            compressed_chunks = self.compressor.compress_batch(question, reranked_chunks)
+            timings["compress"] = (time.monotonic() - compress_started) * 1000
+            _add_usage(tokens, self.llm.last_usage)
+            for chunk, compressed in zip(reranked_chunks, compressed_chunks):
+                final_chunk_traces.append(
+                    CompressedChunkTrace(
+                        chunk=compressed if compressed is not None else chunk,
+                        original_line_count=len(chunk.code.splitlines()),
+                        compressed_line_count=(
+                            len(compressed.code.splitlines()) if compressed else 0
+                        ),
+                        dropped=compressed is None,
+                    )
                 )
-                for c in answer.citations
+                if compressed is not None:
+                    final_chunks.append(compressed)
+            # falls back to the whole reranked list when compression dropped everything
+            final_chunks = final_chunks or reranked_chunks
+        else:
+            # Skip compression — there's nothing to trim to, we want everything — and
+            # gate only on total size, since sending it all is the point.
+            wide_chunks = self._wide_fallback_chunks(space_id, routed_source_ids)
+            wide_file_count = len({c.file_path for c in wide_chunks})
+            token_estimate = (
+                sum(len(c.embeddable_text) for c in wide_chunks) // Tokenizer.CHARS_PER_TOKEN
+            )
+            if wide_chunks and token_estimate <= self.settings.wide_answer_max_tokens:
+                logger.info(
+                    "  [5/6 compress] going wide (%s) — sending %d source(s), "
+                    "%d whole file(s) (~%d tokens) instead",
+                    wide_reason, len(routed_source_ids), wide_file_count, token_estimate,
+                )
+                final_chunks = wide_chunks
+                final_chunk_traces = [
+                    CompressedChunkTrace(
+                        chunk=chunk,
+                        original_line_count=len(chunk.code.splitlines()),
+                        compressed_line_count=len(chunk.code.splitlines()),
+                        dropped=False,
+                    )
+                    for chunk in wide_chunks
+                ]
+            elif wide_chunks:
+                logger.info(
+                    "  [5/6 compress] going wide (%s) but whole-source fallback (~%d "
+                    "tokens) exceeds the %d token budget — refusing",
+                    wide_reason, token_estimate, self.settings.wide_answer_max_tokens,
+                )
+                too_large_message = self._too_large_message(wide_file_count, token_estimate)
+            else:
+                logger.info(
+                    "  [5/6 compress] going wide (%s) but no routed sources to fall back to",
+                    wide_reason,
+                )
+
+        logger.info(
+            "  [6/6 retrieval] %d chunks ready for generation (%.1fs elapsed)",
+            len(final_chunks), time.monotonic() - started,
+        )
+        return _RetrievalState(
+            query_vector=candidate.query_vector,
+            routed=candidate.routed,
+            scored_candidates=candidate.scored_candidates,
+            reranked_scored=candidate.reranked_scored,
+            final_chunks=final_chunks,
+            final_chunk_traces=final_chunk_traces,
+            wide_fallback=wide_fallback,
+            wide_fallback_reason=wide_reason,
+            too_large_message=too_large_message,
+            sub_questions=sub_questions,
+            routed_origin=routed_origin,
+            candidate_origin=candidate_origin,
+            reranked_origin=reranked_origin,
+            timings=timings,
+            tokens=tokens,
+        )
+
+    def _retrieve(self, question: str, space_id: str) -> _RetrievalState:
+        """Runs decompose→embed→route→hybrid→rerank→compress — everything before
+        generation. Split out so query_trace() (blocking) and query_trace_stream()
+        (streaming) share one retrieval pass; only how the final answer text arrives
+        differs between them.
+
+        A compound question ("what does X do, and how is that different from Y?") is
+        split into independent sub-questions first: a single embedding of a two-topic
+        question is a blurry average of both, which hurts routing and hybrid search for
+        either one. Each sub-question then runs stages 1-4 IN PARALLEL (bounded by
+        max_subquestions), merges, and only then hits the shared compress/generate
+        stages below. Most questions aren't compound — decompose() returns the question
+        unchanged — so this is the same single pass as before for the common case."""
+        started = time.monotonic()
+        logger.info("RETRIEVAL START | space=%s | question=%r", space_id, question)
+        try:
+            # Reset first: decompose's keyword pre-filter skips the LLM call entirely for
+            # most questions, and without this last_usage would still hold whatever an
+            # earlier, unrelated call left behind.
+            self.bulk_llm.last_usage = None
+            decompose_started = time.monotonic()
+            sub_questions = self.decomposer.decompose(question)
+            decompose_ms = (time.monotonic() - decompose_started) * 1000
+            decompose_tokens: dict[str, int] = {}
+            _add_usage(decompose_tokens, self.bulk_llm.last_usage)
+            if len(sub_questions) == 1:
+                states = [self._retrieve_candidates(sub_questions[0], space_id)]
+                decomposed: list[str] = []
+            else:
+                logger.info(
+                    "  [0/6 decompose] split into %d sub-questions: %r",
+                    len(sub_questions), sub_questions,
+                )
+                decomposed = sub_questions
+                # Cancellation rides a ContextVar (src/cancellation.py) that FastAPI's
+                # run_in_threadpool copies automatically; a bare ThreadPoolExecutor does
+                # NOT do that for its workers, so without an explicit copy a browser
+                # disconnect would silently fail to cancel these in-flight sub-retrievals.
+                # A fresh copy_context() per task, not one shared copy: a Context can only
+                # be entered (run()) by one call at a time, so reusing one across threads
+                # raises "cannot enter context: ... already entered" the instant a second
+                # thread tries to run() it concurrently.
+                with ThreadPoolExecutor(max_workers=len(sub_questions)) as pool:
+                    futures = [
+                        pool.submit(contextvars.copy_context().run, self._retrieve_candidates, q, space_id)
+                        for q in sub_questions
+                    ]
+                    states = [f.result() for f in futures]
+            check()
+            # Each sub-question's OWN rerank already gates on min_top_score (see
+            # CrossReranker.rerank_scored) — an empty reranked_scored means THAT
+            # sub-question specifically found nothing, before the merge below pools
+            # everything together and that per-sub-question signal is lost. Only
+            # meaningful when decomposed: one question has no "some parts" to be
+            # partial about — its coverage is already fully captured by the existing
+            # NO_MATCH/wide_fallback gate.
+            insufficient_sub_qs = (
+                [q for q, s in zip(sub_questions, states) if not s.reranked_scored]
+                if len(sub_questions) > 1 else []
+            )
+            # One retry per insufficient sub-question, capped at a single extra pass (no
+            # loop): rewrite it — the original phrasing may just not match how the source
+            # text describes it — and search again. Only meaningful when decomposed, same
+            # scope as the sufficiency signal itself.
+            retried_sub_questions: dict[str, str] = {}
+            retry_ms = 0.0
+            retry_tokens: dict[str, int] = {}
+            if insufficient_sub_qs and len(sub_questions) > 1:
+                retry_started = time.monotonic()
+                for idx, sub_q in enumerate(sub_questions):
+                    if sub_q not in insufficient_sub_qs:
+                        continue
+                    self.bulk_llm.last_usage = None
+                    rewritten = self.decomposer.rewrite_for_retry(sub_q, question)
+                    _add_usage(retry_tokens, self.bulk_llm.last_usage)
+                    if rewritten == sub_q:
+                        continue
+                    retried_sub_questions[sub_q] = rewritten
+                    logger.info("  [retry] %r found nothing, retrying as %r", sub_q, rewritten)
+                    new_state = self._retrieve_candidates(rewritten, space_id)
+                    if new_state.reranked_scored:
+                        states[idx] = new_state
+                retry_ms = (time.monotonic() - retry_started) * 1000
+                insufficient_sub_qs = [q for q, s in zip(sub_questions, states) if not s.reranked_scored]
+
+            if not insufficient_sub_qs:
+                sufficiency = "sufficient"
+            elif len(insufficient_sub_qs) == len(states):
+                sufficiency = "insufficient"
+            else:
+                sufficiency = "partial"
+
+            candidate, routed_origin, candidate_origin, reranked_origin = self._merge_candidates(
+                sub_questions, states
+            )
+            state = self._finish_retrieval(
+                question, space_id, candidate, decomposed,
+                routed_origin, candidate_origin, reranked_origin, started,
+            )
+            state.timings["decompose"] = decompose_ms
+            _add_usage(state.tokens, decompose_tokens)
+            if retried_sub_questions:
+                state.timings["retry"] = retry_ms
+                _add_usage(state.tokens, retry_tokens)
+            state.sufficiency = sufficiency
+            state.insufficient_sub_questions = insufficient_sub_qs
+            state.retried_sub_questions = retried_sub_questions
+        except Cancelled:
+            logger.warning(
+                "RETRIEVAL CANCELLED after %.1fs | question=%r", time.monotonic() - started, question
+            )
+            raise
+        return state
+
+    def _build_query_trace(
+        self, question: str, space_id: str, state: _RetrievalState, answer_trace: AnswerTrace,
+        raw_question: str | None, history: list[tuple[str, str]] | None,
+    ) -> QueryTrace:
+        return QueryTrace(
+            question=question,
+            space_id=space_id,
+            query_embedding=vector_preview(state.query_vector),
+            sub_questions=state.sub_questions,
+            routed_files=[
+                RoutedFile(file_path=fp, score=score, source_question=state.routed_origin.get(fp))
+                for fp, _source_id, score in state.routed
             ],
-            confidence=answer.confidence,
-            model=self.settings.llm_model,
-            chart=answer.chart,
+            candidates=[
+                ScoredChunkTrace(
+                    chunk=sc.chunk,
+                    dense_score=sc.dense_score,
+                    bm25_score=sc.bm25_score,
+                    fused_score=sc.fused_score,
+                    source_question=state.candidate_origin.get(sc.chunk.id),
+                )
+                for sc in state.scored_candidates
+            ],
+            reranked=[
+                RerankedChunkTrace(
+                    chunk=chunk, rerank_score=score,
+                    source_question=state.reranked_origin.get(chunk.id),
+                )
+                for chunk, score in state.reranked_scored
+            ],
+            final_chunks=state.final_chunk_traces,
+            rerank_min_top_score=self.settings.rerank_min_top_score,
+            wide_fallback=state.wide_fallback,
+            wide_fallback_reason=state.wide_fallback_reason,
+            system_prompt=SYSTEM_PROMPT,
+            final_prompt=self.answer_generator.build_prompt(
+                raw_question or question, state.final_chunks, state.insufficient_sub_questions
+            ),
+            history=[{"role": role, "content": content} for role, content in (history or [])],
+            answer=answer_trace,
+            timings=state.timings,
+            tokens=state.tokens,
+            sufficiency=state.sufficiency,
+            insufficient_sub_questions=state.insufficient_sub_questions,
+            retried_sub_questions=state.retried_sub_questions,
         )
 
     def query_trace(
@@ -446,168 +915,63 @@ class Pipeline:
         raw_question: str | None = None, history: list[tuple[str, str]] | None = None,
     ) -> QueryTrace:
         """Runs the same retrieval stages as query(), returning every stage's intermediate
-        scores/chunks alongside the final answer. Logs each stage as it completes."""
+        scores/chunks alongside the final answer."""
         started = time.monotonic()
-        stage = "embed-question"
-
-        def done(step: str, detail: str) -> None:
-            logger.info("  [%s] %s (%.1fs elapsed)", step, detail, time.monotonic() - started)
-
-        logger.info("RETRIEVAL START | space=%s | question=%r", space_id, question)
-        try:
-            query_vector = self.embedder.embed_one(question)
-            done("1/7 embed", f"{len(query_vector)}d query vector")
-
-            stage = "route"
-            routed = self.router.route_to_files_scored(
-                question, space_id, self.settings.top_files, query_vector=query_vector
-            )
-            file_paths = [file_path for file_path, _source_id, _score in routed]
-            # Only the top-scoring source(s), not every source with even one weak match —
-            # Qdrant sorts score-descending, so routed[0] is the best.
-            routed_source_ids: list[str] = []
-            if routed:
-                top_score = routed[0][2]
-                routed_source_ids = list(dict.fromkeys(
-                    source_id for _fp, source_id, score in routed if score == top_score
-                ))
-            done("2/7 route", f"{len(routed)} files shortlisted")
-
-            stage = "hybrid-search"
-            scored_candidates = self.hybrid_search.search_scored(
-                question, space_id, file_paths, self.settings.hybrid_candidate_k,
-                query_vector=query_vector,
-            )
-            candidate_chunks = [sc.chunk for sc in scored_candidates]
-            done("3/7 hybrid", f"{len(candidate_chunks)} candidates")
-
-            stage = "rerank"
-            reranked_scored = self.cross_reranker.rerank_scored(
-                question, candidate_chunks, self.settings.rerank_top_k
-            )
-            done(
-                "4/7 rerank",
-                f"{len(reranked_scored)} kept of {len(candidate_chunks)}"
-                + ("" if reranked_scored else " — top score below gate"),
-            )
-
-            stage = "compress"
-            reranked_chunks = [chunk for chunk, _ in reranked_scored]
-            final_chunk_traces: list[CompressedChunkTrace] = []
-            final_chunks: list[CodeChunk] = []
-            wide_fallback = False
-            wide_reason = ""
-            too_large_message: str | None = None
-            check()
-
-            # Three ways into the wide path, cheapest first — see BroadIntentClassifier's
-            # docstring for why the LLM tier only fires on the genuinely ambiguous case.
-            if not reranked_chunks:
-                wide_fallback, wide_reason = True, "no chunk answered this on its own"
-            elif matches_broad_keywords(question):
-                wide_fallback, wide_reason = True, "question language implies broad coverage"
-            elif self.intent_classifier.is_broad(question):
-                wide_fallback, wide_reason = True, "classified as a broad-coverage question"
-
-            if not wide_fallback:
-                logger.info("  [5/7 compress] %d chunks in one batched call", len(reranked_chunks))
-                compressed_chunks = self.compressor.compress_batch(question, reranked_chunks)
-                for chunk, compressed in zip(reranked_chunks, compressed_chunks):
-                    final_chunk_traces.append(
-                        CompressedChunkTrace(
-                            chunk=compressed if compressed is not None else chunk,
-                            original_line_count=len(chunk.code.splitlines()),
-                            compressed_line_count=(
-                                len(compressed.code.splitlines()) if compressed else 0
-                            ),
-                            dropped=compressed is None,
-                        )
-                    )
-                    if compressed is not None:
-                        final_chunks.append(compressed)
-                # falls back to the whole reranked list when compression dropped everything
-                final_chunks = final_chunks or reranked_chunks
-            else:
-                # Skip compression — there's nothing to trim to, we want everything — and
-                # gate only on total size, since sending it all is the point.
-                wide_chunks = self._wide_fallback_chunks(space_id, routed_source_ids)
-                wide_file_count = len({c.file_path for c in wide_chunks})
-                token_estimate = (
-                    sum(len(c.embeddable_text) for c in wide_chunks) // Tokenizer.CHARS_PER_TOKEN
-                )
-                if wide_chunks and token_estimate <= self.settings.wide_answer_max_tokens:
-                    logger.info(
-                        "  [5/7 compress] going wide (%s) — sending %d source(s), "
-                        "%d whole file(s) (~%d tokens) instead",
-                        wide_reason, len(routed_source_ids), wide_file_count, token_estimate,
-                    )
-                    final_chunks = wide_chunks
-                    final_chunk_traces = [
-                        CompressedChunkTrace(
-                            chunk=chunk,
-                            original_line_count=len(chunk.code.splitlines()),
-                            compressed_line_count=len(chunk.code.splitlines()),
-                            dropped=False,
-                        )
-                        for chunk in wide_chunks
-                    ]
-                elif wide_chunks:
-                    logger.info(
-                        "  [5/7 compress] going wide (%s) but whole-source fallback (~%d "
-                        "tokens) exceeds the %d token budget — refusing",
-                        wide_reason, token_estimate, self.settings.wide_answer_max_tokens,
-                    )
-                    too_large_message = self._too_large_message(wide_file_count, token_estimate)
-                else:
-                    logger.info(
-                        "  [5/7 compress] going wide (%s) but no routed sources to fall back to",
-                        wide_reason,
-                    )
-
-            done("6/7 prompt", f"{len(final_chunks)} chunks in the final prompt")
-            stage = "answer"
-        except Cancelled:
-            logger.warning(
-                "RETRIEVAL CANCELLED at stage '%s' after %.1fs | question=%r",
-                stage, time.monotonic() - started, question,
-            )
-            raise
-
+        state = self._retrieve(question, space_id)
+        self.llm.last_usage = None
+        generate_started = time.monotonic()
         answer_trace = self._answer_trace(
-            raw_question or question, final_chunks, history, empty_message=too_large_message
+            raw_question or question, state.final_chunks, history,
+            empty_message=state.too_large_message, insufficient=state.insufficient_sub_questions,
         )
-        logger.info(
-            "RETRIEVAL DONE in %.1fs | %d citations | conf %.1f",
-            time.monotonic() - started, len(answer_trace.citations), answer_trace.confidence,
-        )
+        if state.final_chunks:
+            state.timings["generate"] = (time.monotonic() - generate_started) * 1000
+            _add_usage(state.tokens, self.llm.last_usage)
+        logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
+        return self._build_query_trace(question, space_id, state, answer_trace, raw_question, history)
 
-        return QueryTrace(
-            question=question,
-            space_id=space_id,
-            query_embedding=vector_preview(query_vector),
-            routed_files=[RoutedFile(file_path=fp, score=score) for fp, _source_id, score in routed],
-            candidates=[
-                ScoredChunkTrace(
-                    chunk=sc.chunk,
-                    dense_score=sc.dense_score,
-                    bm25_score=sc.bm25_score,
-                    fused_score=sc.fused_score,
+    def query_trace_stream(
+        self, question: str, space_id: str,
+        raw_question: str | None = None, history: list[tuple[str, str]] | None = None,
+    ) -> Generator[str, None, QueryTrace]:
+        """Same as query_trace(), but yields the answer's text deltas as they arrive
+        instead of blocking for the full response. Once exhausted, the completed
+        QueryTrace is available as the generator's return value (StopIteration.value) —
+        built only once the full text (and its chart, if any) is known."""
+        started = time.monotonic()
+        state = self._retrieve(question, space_id)
+
+        if not state.final_chunks:
+            text = state.too_large_message or self.NO_MATCH
+            yield text
+            answer_trace = AnswerTrace(text=text, model=self.settings.llm_model)
+        else:
+            check()
+            self.llm.last_usage = None
+            generate_started = time.monotonic()
+            full_text = ""
+            try:
+                for delta in self.answer_generator.answer_stream(
+                    raw_question or question, state.final_chunks, history=history,
+                    insufficient=state.insufficient_sub_questions,
+                ):
+                    full_text += delta
+                    yield delta
+                answer = self.answer_generator.finalize(full_text)
+                answer_trace = AnswerTrace(
+                    text=answer.text, model=self.settings.llm_model, chart=answer.chart
                 )
-                for sc in scored_candidates
-            ],
-            reranked=[
-                RerankedChunkTrace(chunk=chunk, rerank_score=score)
-                for chunk, score in reranked_scored
-            ],
-            final_chunks=final_chunk_traces,
-            rerank_min_top_score=self.settings.rerank_min_top_score,
-            wide_fallback=wide_fallback,
-            wide_fallback_reason=wide_reason,
-            system_prompt=SYSTEM_PROMPT,
-            final_prompt=self.answer_generator.build_prompt(raw_question or question, final_chunks),
-            history=[{"role": role, "content": content} for role, content in (history or [])],
-            answer=answer_trace,
-        )
+            except RuntimeError as exc:
+                # Persist whatever streamed before the failure — that's what the user
+                # already saw — alongside the error, rather than discarding it.
+                answer_trace = AnswerTrace(
+                    text=full_text, model=self.settings.llm_model, error=str(exc)
+                )
+            state.timings["generate"] = (time.monotonic() - generate_started) * 1000
+            _add_usage(state.tokens, self.llm.last_usage)
+
+        logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
+        return self._build_query_trace(question, space_id, state, answer_trace, raw_question, history)
 
     def vectors_trace(self, question: str, space_id: str) -> VectorsTrace:
         """On-demand PCA projection for the vector-space UI — split out of query_trace()

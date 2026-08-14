@@ -86,12 +86,15 @@ class Summarizer:
         self, space_id: str, source_id: str, file_path: str, language: str, text: str
     ) -> FileSummary:
         """No LLM call: prose (PDF/docx/pasted text) is already self-describing, so the
-        raw leading text works fine as the routing-embedding target."""
+        raw leading text works fine as the routing-embedding target. 2000 chars, not 500:
+        a page holding the tail of one story and the start of another had its first 500
+        chars fully claimed by the second story's opening, so routing never saw any
+        signal for the first — a real miss caught by evals/golden_set.py."""
         return FileSummary(
             space_id=space_id,
             source_id=source_id,
             file_path=file_path,
             language=language,
-            summary=text[:500].strip(),
+            summary=text[:2000].strip(),
             symbols=[],
         )

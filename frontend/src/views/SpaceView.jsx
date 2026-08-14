@@ -3,6 +3,7 @@ import { getSpace } from "../api.js";
 import { AVATAR_BG, AVATAR_INK, cls } from "../components/RagAtoms.jsx";
 import { ChatMain, ChatSidebar, useChatController } from "../components/ChatPanel.jsx";
 import { SourcesMain, SourcesSidebar, useSourcesController } from "../components/SourcesPanel.jsx";
+import { InsightsMain, useInsightsController } from "./InsightsView.jsx";
 
 export function SpaceView({ spaceId, onBack }) {
   const [space, setSpace] = useState(null);
@@ -20,6 +21,7 @@ export function SpaceView({ spaceId, onBack }) {
 
   const chat = useChatController(spaceId);
   const sourcesCtl = useSourcesController(spaceId, space?.sources || [], refresh);
+  const insightsCtl = useInsightsController(spaceId);
 
   if (error) {
     return (
@@ -72,15 +74,25 @@ export function SpaceView({ spaceId, onBack }) {
             >
               Sources ({space.sources.length})
             </button>
+            <button
+              className={cls("rag-space-sidebar__tab", tab === "insights" && "rag-space-sidebar__tab--active")}
+              onClick={() => setTab("insights")}
+            >
+              Insights
+            </button>
           </div>
         </div>
-        <div className="rag-space-sidebar__content">
-          {tab === "chat" ? <ChatSidebar {...chat} /> : <SourcesSidebar {...sourcesCtl} />}
-        </div>
+        {tab !== "insights" && (
+          <div className="rag-space-sidebar__content">
+            {tab === "chat" ? <ChatSidebar {...chat} /> : <SourcesSidebar {...sourcesCtl} />}
+          </div>
+        )}
       </aside>
 
       <div className="rag-space__main">
-        {tab === "chat" ? <ChatMain {...chat} /> : <SourcesMain {...sourcesCtl} />}
+        {tab === "chat" && <ChatMain {...chat} />}
+        {tab === "sources" && <SourcesMain {...sourcesCtl} />}
+        {tab === "insights" && <InsightsMain spaceName={space.name} ctl={insightsCtl} />}
       </div>
     </div>
   );

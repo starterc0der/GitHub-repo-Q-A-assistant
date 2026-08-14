@@ -5,12 +5,13 @@ import hashlib
 import json
 import logging
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from qdrant_client.http.exceptions import UnexpectedResponse
 
@@ -75,6 +76,9 @@ def _insert_message(
     standalone_question: str | None = None,
     cache_hit: bool = False,
     cached_from: str | None = None,
+    cache_kind: str | None = None,
+    cache_match_question: str | None = None,
+    cache_match_score: float | None = None,
     trace: str | None = None,
     chart: str | None = None,
 ) -> str:
@@ -82,68 +86,89 @@ def _insert_message(
     with connect(settings.db_path) as conn:
         conn.execute(
             "INSERT INTO messages "
-            "(id, chat_id, seq, role, content, standalone_question, cache_hit, cached_from, trace, chart, created_at) "
-            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
+            "(id, chat_id, seq, role, content, standalone_question, cache_hit, cached_from, "
+            "cache_kind, cache_match_question, cache_match_score, trace, chart, created_at) "
+            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
             (
                 message_id, chat_id, role, content, standalone_question,
-                int(cache_hit), cached_from, trace, chart, now(), chat_id,
+                int(cache_hit), cached_from, cache_kind, cache_match_question, cache_match_score,
+                trace, chart, now(), chat_id,
             ),
         )
     return message_id
 
 
 def _cache_lookup(space_id: str, raw_question: str) -> dict[str, object] | None:
-    """Exact-match only, and only ever populated from turn-1 (history-free) questions —
-    see the module docstring below for why that's the correctness-load-bearing rule."""
+    """Exact-match first (free, zero wrong-answer risk) — only ever populated from turn-1
+    (history-free) questions, see the module docstring below for why that's the
+    correctness-load-bearing rule. On a miss, falls back to the semantic cache
+    (Pipeline.semantic_cache_lookup): a paraphrase of an already-answered question
+    ("tell me about Bhishma" after "who is Bhishma") embeds close to it even though the
+    text hashes differently — exact-match structurally can't catch that."""
     question_hash = _hash_question(raw_question)
     with connect(settings.db_path) as conn:
         row = conn.execute(
             "SELECT message_id FROM qa_cache WHERE space_id=? AND question_hash=?",
             (space_id, question_hash),
         ).fetchone()
-        if row is None:
-            return None
-        conn.execute(
-            "UPDATE qa_cache SET hit_count = hit_count + 1 WHERE space_id=? AND question_hash=?",
-            (space_id, question_hash),
-        )
-        message = conn.execute("SELECT * FROM messages WHERE id=?", (row["message_id"],)).fetchone()
-    return dict(message) if message else None
+        if row is not None:
+            conn.execute(
+                "UPDATE qa_cache SET hit_count = hit_count + 1 WHERE space_id=? AND question_hash=?",
+                (space_id, question_hash),
+            )
+            message = conn.execute("SELECT * FROM messages WHERE id=?", (row["message_id"],)).fetchone()
+            if message is not None:
+                logger.info("CACHE HIT (exact) | space=%s | question=%r", space_id, raw_question)
+                return {**dict(message), "cache_kind": "exact", "cache_match_question": None, "cache_match_score": None}
+
+    semantic = pipeline.semantic_cache_lookup(space_id, raw_question)
+    if semantic is None:
+        return None
+    message_id, matched_question, score = semantic
+    with connect(settings.db_path) as conn:
+        message = conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+    if message is None:
+        return None
+    logger.info(
+        "CACHE HIT (semantic) | space=%s | question=%r | matched=%r | score=%.3f",
+        space_id, raw_question, matched_question, score,
+    )
+    return {**dict(message), "cache_kind": "semantic", "cache_match_question": matched_question, "cache_match_score": score}
 
 
 def _cache_put(space_id: str, raw_question: str, message_id: str) -> None:
+    question_hash = _hash_question(raw_question)
     with connect(settings.db_path) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO qa_cache (space_id, question_hash, question, message_id, hit_count, created_at) "
             "VALUES (?, ?, ?, ?, 0, ?)",
-            (space_id, _hash_question(raw_question), raw_question, message_id, now()),
+            (space_id, question_hash, raw_question, message_id, now()),
         )
+    pipeline.semantic_cache_put(space_id, question_hash, raw_question, message_id)
 
 
-async def _run_cancellable(request: Request, work: Callable[[], object]) -> object:
-    """Run blocking pipeline work in a threadpool, aborting it if the client goes away."""
-    cancelled = threading.Event()
+def _sse(event: dict) -> bytes:
+    return f"data: {json.dumps(event)}\n\n".encode()
 
-    async def watch_client() -> None:
-        while not cancelled.is_set():
-            if await request.is_disconnected():
-                cancelled.set()
-                return
-            await asyncio.sleep(0.4)
 
-    def runner() -> object:
-        token = set_canceller(cancelled.is_set)
-        try:
-            return work()
-        finally:
-            reset_canceller(token)
+class _StreamDone:
+    """Wraps query_trace_stream()'s return value (the finished QueryTrace). A bare
+    StopIteration can't cross the `await run_in_threadpool(...)` boundary: CPython
+    converts a StopIteration escaping any coroutine frame into a RuntimeError
+    ("coroutine raised StopIteration"), so it never reaches a `except StopIteration`
+    on the async side. _advance() below catches it purely on the sync side instead."""
 
-    watcher = asyncio.create_task(watch_client())
+    __slots__ = ("value",)
+
+    def __init__(self, value: object):
+        self.value = value
+
+
+def _advance(gen):
     try:
-        return await run_in_threadpool(runner)
-    finally:
-        cancelled.set()
-        watcher.cancel()
+        return next(gen)
+    except StopIteration as stop:
+        return _StreamDone(stop.value)
 
 
 class CreateChatRequest(BaseModel):
@@ -194,7 +219,7 @@ def list_messages(chat_id: str) -> dict[str, object]:
     _get_chat_row(chat_id)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
-            "SELECT id, role, content, standalone_question, cache_hit, cached_from, chart, created_at, "
+            "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, created_at, "
             "(trace IS NOT NULL) AS has_trace FROM messages WHERE chat_id=? ORDER BY seq",
             (chat_id,),
         ).fetchall()
@@ -237,8 +262,14 @@ def message_vectors(message_id: str) -> dict[str, object]:
 
 
 @router.post("/chats/{chat_id}/messages")
-async def send_message(chat_id: str, request: Request, body: SendMessageRequest) -> Response:
-    """The full turn: rewrite -> cache check -> retrieve -> compress -> answer -> persist.
+async def send_message(chat_id: str, request: Request, body: SendMessageRequest) -> StreamingResponse:
+    """The full turn, streamed: rewrite -> cache check -> retrieve -> compress -> answer
+    (streamed token-by-token) -> persist.
+
+    Every path — meta-answer, cache hit, real generation, error — emits the same SSE
+    shape: zero or more {"type":"delta"} events, then exactly one {"type":"done"} or
+    {"type":"error"} event. One response shape for the frontend to handle, regardless of
+    which internal path produced the answer.
 
     Two things make this correct rather than just fast:
     - Retrieval embeds the REWRITTEN standalone question; generation answers the user's
@@ -251,17 +282,50 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
       context-free by construction.
     """
     chat = _get_chat_row(chat_id)
-    space_id = chat["space_id"]
-    raw_question = body.content
+    return StreamingResponse(
+        _send_message_events(chat_id, chat["space_id"], body.content, request),
+        media_type="text/event-stream",
+    )
 
-    history = _load_history(chat_id, settings.history_turns)
+
+async def _send_message_events(
+    chat_id: str, space_id: str, raw_question: str, request: Request
+) -> AsyncIterator[bytes]:
+    """Owns cancellation for the whole turn — one disconnect watcher for the entire
+    stream, rather than one per blocking step (each run_in_threadpool call below inherits
+    the ContextVar canceller installed here, same mechanism _run_cancellable used, just
+    scoped to the request instead of to each call)."""
+    cancelled = threading.Event()
+
+    async def watch_client() -> None:
+        while not cancelled.is_set():
+            if await request.is_disconnected():
+                cancelled.set()
+                return
+            await asyncio.sleep(0.4)
+
+    token = set_canceller(cancelled.is_set)
+    watcher = asyncio.create_task(watch_client())
     try:
-        is_meta, standalone = await _run_cancellable(
-            request, lambda: pipeline.rewrite_standalone(raw_question, history)
-        )
+        async for event in _run_turn(chat_id, space_id, raw_question):
+            yield event
     except Cancelled:
         logger.info("Chat message cancelled by client disconnect: %r", raw_question)
-        return Response(status_code=499)
+    except UnexpectedResponse as exc:
+        if exc.status_code != 404:
+            raise
+        yield _sse({"type": "error", "message": f"Space {space_id!r} has no vectors in Qdrant yet."})
+    except RuntimeError as exc:
+        yield _sse({"type": "error", "message": str(exc)})
+    finally:
+        cancelled.set()
+        watcher.cancel()
+        reset_canceller(token)
+
+
+async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIterator[bytes]:
+    history = _load_history(chat_id, settings.history_turns)
+    is_meta, standalone = await run_in_threadpool(pipeline.rewrite_standalone, raw_question, history)
 
     # A question about the conversation itself ("what have we talked about") rather than
     # the document — the rewrite call above already classified this as a side effect (see
@@ -271,13 +335,8 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
         # duplicated into its own history.
         full_history = _load_full_history(chat_id)
         _insert_message(chat_id, "user", raw_question)
-        try:
-            content = await _run_cancellable(
-                request, lambda: pipeline.answer_meta(raw_question, full_history)
-            )
-        except Cancelled:
-            logger.info("Chat message cancelled by client disconnect: %r", raw_question)
-            return Response(status_code=499)
+        content = await run_in_threadpool(pipeline.answer_meta, raw_question, full_history)
+        yield _sse({"type": "delta", "text": content})
         # No retrieval stages ran, so this isn't a QueryTrace — just the actual
         # transcript the model saw, so "why did it say that" is still answerable.
         meta_trace = json.dumps({
@@ -287,48 +346,58 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
         })
         assistant_id = _insert_message(chat_id, "assistant", content, trace=meta_trace)
         _touch_chat(chat_id)
-        return JSONResponse(_get_message(assistant_id))
+        yield _sse({"type": "done", "message": _get_message(assistant_id)})
+        return
 
     _insert_message(
         chat_id, "user", raw_question,
         standalone_question=standalone if history else None,
     )
 
+    cache_ms: float | None = None
     if not history:
+        cache_started = time.monotonic()
         cached = _cache_lookup(space_id, raw_question)
+        cache_ms = (time.monotonic() - cache_started) * 1000
         if cached is not None:
+            # This turn did a cache lookup, nothing else — its own timings/tokens must
+            # say that, not silently carry the ORIGINAL run's retrieval/LLM costs as if
+            # they happened again just now.
+            cached_trace = json.loads(cached["trace"]) if cached["trace"] else {}
+            cached_trace["timings"] = {"cache": cache_ms}
+            cached_trace["tokens"] = {}
             assistant_id = _insert_message(
                 chat_id, "assistant", cached["content"],
-                cache_hit=True, cached_from=cached["id"], trace=cached["trace"],
-                chart=cached["chart"],
+                cache_hit=True, cached_from=cached["id"], trace=json.dumps(cached_trace),
+                chart=cached["chart"], cache_kind=cached["cache_kind"],
+                cache_match_question=cached["cache_match_question"],
+                cache_match_score=cached["cache_match_score"],
             )
+            _set_title_if_new(chat_id, raw_question)
             _touch_chat(chat_id)
-            return JSONResponse(_get_message(assistant_id))
+            yield _sse({"type": "delta", "text": cached["content"]})
+            yield _sse({"type": "done", "message": _get_message(assistant_id)})
+            return
 
-    try:
-        trace = await _run_cancellable(
-            request,
-            lambda: asdict(
-                pipeline.query_trace(standalone, space_id, raw_question=raw_question, history=history)
-            ),
-        )
-    except UnexpectedResponse as exc:
-        if exc.status_code != 404:
-            raise
-        raise HTTPException(
-            status_code=409, detail=f"Space {space_id!r} has no vectors in Qdrant yet."
-        ) from exc
-    except Cancelled:
-        logger.info("Chat message cancelled by client disconnect: %r", raw_question)
-        return Response(status_code=499)
+    gen = pipeline.query_trace_stream(standalone, space_id, raw_question=raw_question, history=history)
+    trace = None
+    while True:
+        result = await run_in_threadpool(_advance, gen)
+        if isinstance(result, _StreamDone):
+            trace = result.value
+            break
+        yield _sse({"type": "delta", "text": result})
 
-    answer = trace.get("answer") or {}
+    if cache_ms is not None:
+        trace.timings["cache"] = cache_ms
+    trace_dict = asdict(trace)
+    answer = trace_dict.get("answer") or {}
     # answer.text is "" (not missing) on an LLM failure — `or` catches that; a plain
     # dict.get default would not, since the key is present.
     content = answer.get("text") or answer.get("error") or pipeline.NO_MATCH
     chart = answer.get("chart")
     assistant_id = _insert_message(
-        chat_id, "assistant", content, trace=json.dumps(trace),
+        chat_id, "assistant", content, trace=json.dumps(trace_dict),
         chart=json.dumps(chart) if chart else None,
     )
 
@@ -336,14 +405,13 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
         _cache_put(space_id, raw_question, assistant_id)
     _set_title_if_new(chat_id, raw_question)
     _touch_chat(chat_id)
-
-    return JSONResponse(_get_message(assistant_id))
+    yield _sse({"type": "done", "message": _get_message(assistant_id)})
 
 
 def _get_message(message_id: str) -> dict[str, object]:
     with connect(settings.db_path) as conn:
         row = conn.execute(
-            "SELECT id, role, content, standalone_question, cache_hit, cached_from, chart, created_at, "
+            "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, created_at, "
             "(trace IS NOT NULL) AS has_trace FROM messages WHERE id=?",
             (message_id,),
         ).fetchone()

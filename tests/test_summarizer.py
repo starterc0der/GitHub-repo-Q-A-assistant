@@ -53,9 +53,9 @@ def test_summarize_repo_falls_back_to_file_tree_on_llm_failure() -> None:
 def test_template_summary_skips_the_llm_and_truncates() -> None:
     summarizer = Summarizer(FakeLLM(fail=True))
 
-    result = summarizer.template_summary("demo", "src1", "notes.txt", "text", "x" * 600)
+    result = summarizer.template_summary("demo", "src1", "notes.txt", "text", "x" * 2500)
 
-    assert len(result.summary) == 500
+    assert len(result.summary) == 2000
     assert result.symbols == []
 
 

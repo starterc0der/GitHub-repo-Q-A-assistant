@@ -1,4 +1,4 @@
-.PHONY: serve ingest test up
+.PHONY: serve ingest test eval up
 
 serve:
 	uvicorn src.api.main:app --reload
@@ -8,6 +8,9 @@ ingest:
 
 test:
 	pytest tests/
+
+eval:
+	python -m evals.runner
 
 up:
 	docker compose up --build

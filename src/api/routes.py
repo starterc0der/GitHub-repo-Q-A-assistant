@@ -191,6 +191,7 @@ def _run_ingest_background(
             # A source finishing ingest can change the answer to any question in this
             # space — invalidate wholesale rather than guess which cached answers still hold.
             conn.execute("DELETE FROM qa_cache WHERE space_id=?", (space_id,))
+        pipeline.invalidate_qa_cache(space_id)
 
 
 @router.get("/spaces/{space_id}/sources")
@@ -255,6 +256,7 @@ def delete_source(source_id: str) -> dict[str, str]:
     with connect(settings.db_path) as conn:
         conn.execute("DELETE FROM sources WHERE id=?", (source_id,))
         conn.execute("DELETE FROM qa_cache WHERE space_id=?", (row["space_id"],))
+    pipeline.invalidate_qa_cache(row["space_id"])
     return {"status": "deleted"}
 
 

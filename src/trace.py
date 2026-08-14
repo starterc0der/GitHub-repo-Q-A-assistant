@@ -110,6 +110,9 @@ class IngestProgress:
 class RoutedFile:
     file_path: str
     score: float
+    # Which sub-question produced this row, when the question was decomposed — None on
+    # the (common) undecomposed path. See QueryTrace.sub_questions.
+    source_question: str | None = None
 
 
 @dataclass
@@ -118,12 +121,14 @@ class ScoredChunkTrace:
     dense_score: float
     bm25_score: float
     fused_score: float
+    source_question: str | None = None
 
 
 @dataclass
 class RerankedChunkTrace:
     chunk: CodeChunk
     rerank_score: float
+    source_question: str | None = None
 
 
 @dataclass
@@ -135,21 +140,11 @@ class CompressedChunkTrace:
 
 
 @dataclass
-class CitationTrace:
-    file_path: str
-    start_line: int
-    end_line: int
-    snippet: str
-
-
-@dataclass
 class AnswerTrace:
     """The final generation step. Unlike every other stage this one actually calls the
     answer LLM, so a query trace costs one main-model call on top of the compression calls."""
 
     text: str
-    citations: list[CitationTrace] = field(default_factory=list)
-    confidence: float = 1.0
     model: str = ""
     error: str = ""
     # {"title", "categories": [...], "series": [{"name", "values": [...]}]} — only set on
@@ -162,6 +157,10 @@ class QueryTrace:
     question: str
     space_id: str
     query_embedding: EmbeddingPreview
+    # Populated only when `question` was split into independent sub-questions; empty on
+    # the ordinary single-pass path. See RoutedFile/ScoredChunkTrace/RerankedChunkTrace's
+    # source_question to see which sub-question produced which row below.
+    sub_questions: list[str] = field(default_factory=list)
     routed_files: list[RoutedFile] = field(default_factory=list)
     candidates: list[ScoredChunkTrace] = field(default_factory=list)
     reranked: list[RerankedChunkTrace] = field(default_factory=list)
@@ -179,6 +178,26 @@ class QueryTrace:
     # Whole source(s) sent instead of the rerank-scored top-k; reason is the human-readable why.
     wide_fallback: bool = False
     wide_fallback_reason: str = ""
+    # Stage key -> milliseconds. Keys: cache, decompose, embed, route, hybrid, rerank,
+    # gate, compress, generate. compress/generate are absent (not 0) when skipped
+    # entirely (wide fallback, or a gated NO_MATCH) — every other stage always runs at
+    # least its cheap local check, so it always has a real (if small) number.
+    timings: dict[str, float] = field(default_factory=dict)
+    # Total prompt/completion tokens across every LLM call this query made (decompose +
+    # compress + generate, plus broad-intent when it fires). Absent, not zero, when no
+    # provider in the chain reported usage — see LLMClient.last_usage.
+    tokens: dict[str, int] = field(default_factory=dict)
+    # Only meaningful when the question was decomposed: "sufficient" (every sub-question
+    # found evidence), "partial" (some did, some didn't — see insufficient_sub_questions),
+    # "insufficient" (none did — same case the existing NO_MATCH/wide_fallback gate
+    # already catches). A single, undecomposed question is always "sufficient" here; its
+    # own coverage is already fully captured by wide_fallback/NO_MATCH.
+    sufficiency: str = "sufficient"
+    insufficient_sub_questions: list[str] = field(default_factory=list)
+    # original sub-question -> its retry rewrite, for every insufficient sub-question that
+    # got one retry attempt before sufficiency/insufficient_sub_questions above were
+    # finalized. Empty unless at least one sub-question needed a retry. See Pipeline._retrieve.
+    retried_sub_questions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
