@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # kept well under typical per-minute token quotas rather than the model's raw context
     # window, which is usually the looser constraint on a free tier.
     wide_answer_max_tokens: int = 150_000
+    # Defensive ceiling on the normal (non-wide) answer path — rerank_top_k + compression
+    # already keeps this well under budget in practice, but nothing enforced it. If ever
+    # exceeded, lowest-ranked chunks are dropped first rather than silently over-filling
+    # the prompt.
+    answer_context_max_tokens: int = 12_000
 
 
 settings = Settings()

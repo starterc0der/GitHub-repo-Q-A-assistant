@@ -15,6 +15,7 @@ from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator
 from src.generate.decomposer import DecomposeResult, QueryDecomposer
 from src.generate.faithfulness import FaithfulnessChecker, FaithfulnessResult
 from src.generate.intent import BroadIntentClassifier, matches_broad_keywords
+from src.generate.memory import ConversationMemory
 from src.generate.provenance import ClaimAttributor
 from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
@@ -164,6 +165,7 @@ class Pipeline:
         self.decomposer = QueryDecomposer(bulk_llm, settings.max_subquestions)
         self.faithfulness_checker = FaithfulnessChecker(bulk_llm)
         self.claim_attributor = ClaimAttributor(bulk_llm)
+        self.conversation_memory = ConversationMemory(bulk_llm)
 
         self.embedder = Embedder(settings.embedding_model)
         store = VectorStore(settings.qdrant_url)
@@ -179,7 +181,7 @@ class Pipeline:
         )
         self.cross_reranker = CrossReranker(settings.reranker_model, settings.rerank_min_top_score)
         self.compressor = Compressor(llm)
-        self.answer_generator = AnswerGenerator(llm)
+        self.answer_generator = AnswerGenerator(llm, max_context_tokens=settings.answer_context_max_tokens)
 
     @staticmethod
     def default_source_name(url: str) -> str:
@@ -491,6 +493,12 @@ class Pipeline:
         "was already said in this chat. List only topics/people/items that were the "
         "actual subject of a question or a direct answer — not every name that happened "
         "to appear in passing inside an answer's supporting detail.\n"
+        "If the history includes a leading message from a 'system' role, that is a "
+        "compact summary of earlier turns that scrolled out of the raw window — treat "
+        "everything in it exactly as if those turns were asked and answered normally, "
+        "with the same weight as the turns after it. Never mention that a summary "
+        "exists, that turns were condensed, or comment on the conversation's format — "
+        "just answer using everything you were given, older and recent alike.\n"
         "Be concise."
     )
 

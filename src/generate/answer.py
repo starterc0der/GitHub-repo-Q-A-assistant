@@ -5,6 +5,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 
+from src.ingest.chunker import Tokenizer
 from src.index.schema import CodeChunk
 from src.llm_client import LLMClient
 
@@ -94,9 +95,13 @@ class ChartParser:
 class AnswerGenerator:
     """Turns retrieved chunks + a question into a grounded answer."""
 
-    def __init__(self, llm: LLMClient, chart_parser: ChartParser | None = None):
+    def __init__(
+        self, llm: LLMClient, chart_parser: ChartParser | None = None,
+        max_context_tokens: int = 12_000,
+    ):
         self.llm = llm
         self.chart_parser = chart_parser or ChartParser()
+        self.max_context_tokens = max_context_tokens
 
     def answer(
         self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None,
@@ -124,10 +129,7 @@ class AnswerGenerator:
         self, question: str, chunks: list[CodeChunk], insufficient: list[str] | None = None,
         wants_chart: bool = False,
     ) -> str:
-        context = "\n\n".join(
-            f"[{chunk.file_path}:L{chunk.start_line}-L{chunk.end_line}]\n{chunk.code}"
-            for chunk in chunks
-        )
+        context = self._assemble_context(self._within_budget(chunks))
         # Named explicitly rather than left for the model to notice mid-answer: retrieval
         # already knows which part of a compound question came back empty (each
         # sub-question's own rerank gate), so state it as a fact instead of hoping the
@@ -151,3 +153,34 @@ class AnswerGenerator:
                 "numeric values, and if so, use the ```chart block as instructed."
             )
         return f"Source material:\n{context}\n\nQuestion: {question}{note}\n\nAnswer:"
+
+    def _within_budget(self, chunks: list[CodeChunk]) -> list[CodeChunk]:
+        """chunks arrives rerank-score-descending. rerank_top_k + compression already
+        keeps this well under max_context_tokens in practice — this is a defensive
+        ceiling, not the normal code path — so on the rare overflow, drop the
+        lowest-ranked (tail) chunks first rather than silently over-filling the prompt."""
+        kept: list[CodeChunk] = []
+        total = 0
+        for chunk in chunks:
+            tokens = len(chunk.code) // Tokenizer.CHARS_PER_TOKEN
+            if kept and total + tokens > self.max_context_tokens:
+                break
+            kept.append(chunk)
+            total += tokens
+        return kept
+
+    def _assemble_context(self, chunks: list[CodeChunk]) -> str:
+        """Groups chunks by source and orders each group by start_line, instead of the
+        raw rerank-score interleaving — so the model reads one coherent pass per source
+        (all of A, then all of B) rather than jumping A/C/A/B mid-thought. Group order
+        follows first appearance in the (score-descending) input, i.e. each source's
+        best-ranked chunk decides where its group sits."""
+        groups: dict[str, list[CodeChunk]] = {}
+        for chunk in chunks:
+            groups.setdefault(chunk.file_path, []).append(chunk)
+        blocks = []
+        for file_path, group in groups.items():
+            group.sort(key=lambda c: c.start_line)
+            body = "\n\n".join(f"L{c.start_line}-L{c.end_line}:\n{c.code}" for c in group)
+            blocks.append(f"[{file_path}]\n{body}")
+        return "\n\n".join(blocks)

@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
   space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT 'New chat',
+  memory_summary TEXT NOT NULL DEFAULT '',
+  memory_folded_turns INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -111,6 +113,10 @@ def init_db(db_path: str) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN cache_kind TEXT")
             conn.execute("ALTER TABLE messages ADD COLUMN cache_match_question TEXT")
             conn.execute("ALTER TABLE messages ADD COLUMN cache_match_score REAL")
+        chat_columns = {row["name"] for row in conn.execute("PRAGMA table_info(chats)")}
+        if "memory_summary" not in chat_columns:
+            conn.execute("ALTER TABLE chats ADD COLUMN memory_summary TEXT NOT NULL DEFAULT ''")
+            conn.execute("ALTER TABLE chats ADD COLUMN memory_folded_turns INTEGER NOT NULL DEFAULT 0")
         # SQLite can't ALTER a CHECK constraint — recreate the table to widen 'kind'.
         sources_sql = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='sources'"

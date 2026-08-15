@@ -50,25 +50,54 @@ def _set_title_if_new(chat_id: str, title: str) -> None:
         )
 
 
+def _windowed_history(
+    rows: list[tuple[str, str]], turns: int, already_folded: int, existing_summary: str,
+    fold_fn,
+) -> tuple[list[tuple[str, str]], str, int]:
+    """rows: every (role, content) message in the chat, oldest first, two per completed
+    turn. Turns 1..turns pay nothing extra — the raw window still holds everything. Past
+    that, each new turn ages exactly one older turn out of the window; fold_fn folds it
+    into the running summary (only the turns not already folded — never re-summarizes),
+    and the returned history is [("system", summary)] + the last `turns` raw turns, never
+    the unbounded full transcript. Pure function — the caller owns DB reads/writes and
+    threading the (possibly blocking) fold_fn off the event loop."""
+    total_turns = len(rows) // 2
+    if total_turns <= turns:
+        return list(rows), existing_summary, already_folded
+    fold_through = total_turns - turns
+    if fold_through > already_folded:
+        new_turn_rows = rows[already_folded * 2 : fold_through * 2]
+        existing_summary = fold_fn(existing_summary, new_turn_rows)
+        already_folded = fold_through
+    window = rows[fold_through * 2 :]
+    history = ([("system", existing_summary)] if existing_summary else []) + window
+    return history, existing_summary, already_folded
+
+
 def _load_history(chat_id: str, turns: int) -> list[tuple[str, str]]:
-    """Last N user+assistant pairs, oldest first — what the LLM sees for chat continuity."""
-    with connect(settings.db_path) as conn:
-        rows = conn.execute(
-            "SELECT role, content FROM messages WHERE chat_id=? ORDER BY seq DESC LIMIT ?",
-            (chat_id, turns * 2),
-        ).fetchall()
-    return [(r["role"], r["content"]) for r in reversed(rows)]
-
-
-def _load_full_history(chat_id: str) -> list[tuple[str, str]]:
-    """Every prior turn, unbounded — used only for meta answers ("what have we talked
-    about"), where "everything" has to mean the whole chat, not the same recency-capped
-    window _load_history uses to disambiguate a follow-up question for retrieval."""
+    """Recent raw turns plus a rolling summary of everything older — see
+    _windowed_history. Used for both retrieval-rewrite/generation continuity AND meta/recap
+    answers alike: one mechanism, never the fixed-N-only window and never the whole
+    unbounded chat."""
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             "SELECT role, content FROM messages WHERE chat_id=? ORDER BY seq", (chat_id,)
         ).fetchall()
-    return [(r["role"], r["content"]) for r in rows]
+        chat = conn.execute(
+            "SELECT memory_summary, memory_folded_turns FROM chats WHERE id=?", (chat_id,)
+        ).fetchone()
+    all_turns = [(r["role"], r["content"]) for r in rows]
+    history, summary, folded = _windowed_history(
+        all_turns, turns, chat["memory_folded_turns"], chat["memory_summary"],
+        pipeline.conversation_memory.fold,
+    )
+    if folded != chat["memory_folded_turns"]:
+        with connect(settings.db_path) as conn:
+            conn.execute(
+                "UPDATE chats SET memory_summary=?, memory_folded_turns=? WHERE id=?",
+                (summary, folded, chat_id),
+            )
+    return history
 
 
 def _insert_message(
@@ -324,7 +353,9 @@ async def _send_message_events(
 
 
 async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIterator[bytes]:
-    history = _load_history(chat_id, settings.history_turns)
+    # Loaded before the insert below, so the question being asked right now isn't
+    # duplicated into its own history.
+    history = await run_in_threadpool(_load_history, chat_id, settings.history_turns)
     route, route_ms, route_tokens = await run_in_threadpool(pipeline.route_question, raw_question, history)
 
     # A question about the conversation/assistant itself ("what have we talked about",
@@ -332,11 +363,8 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
     # classified this as a side effect (see Pipeline.route_question), so skip retrieval
     # and answer straight from history.
     if route.is_meta:
-        # Loaded before the insert below, so the question being asked right now isn't
-        # duplicated into its own history.
-        full_history = _load_full_history(chat_id)
         _insert_message(chat_id, "user", raw_question)
-        content = await run_in_threadpool(pipeline.answer_meta, raw_question, full_history)
+        content = await run_in_threadpool(pipeline.answer_meta, raw_question, history)
         yield _sse({"type": "delta", "text": content})
         # No retrieval stages ran, so this isn't a QueryTrace — just the actual
         # transcript the model saw plus what it answered, so "why did it say that" is
@@ -349,7 +377,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
         meta_trace = json.dumps({
             "meta": True,
             "question": raw_question,
-            "history": [{"role": role, "content": text} for role, text in full_history],
+            "history": [{"role": role, "content": text} for role, text in history],
             "answer_text": content,
         })
         assistant_id = _insert_message(chat_id, "assistant", content, trace=meta_trace)
