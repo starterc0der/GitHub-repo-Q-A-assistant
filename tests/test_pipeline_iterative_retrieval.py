@@ -54,7 +54,7 @@ def test_retry_that_finds_evidence_upgrades_partial_to_sufficient() -> None:
     rewriting it to directly ask about Kripa (who IS in the corpus, per the "who is
     Kripa?" case verified live) finds evidence on retry."""
     llm = _FakeLLM(
-        "Who is Drona?\nHow is Drona different from Kripa?",
+        "NONE\nPARALLEL\nWho is Drona?\nHow is Drona different from Kripa?",
         retry_replies=["Who is Kripa?"],
     )
     pipeline = _pipeline_stub(llm)
@@ -63,7 +63,7 @@ def test_retry_that_finds_evidence_upgrades_partial_to_sufficient() -> None:
         "How is Drona different from Kripa?": _CandidateState([0.0], [], [], []),
         "Who is Kripa?": _CandidateState([0.0], [], [], [(_chunk("k1"), 0.85)]),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("who is Drona, and how is he different from Kripa?", "demo")
@@ -78,7 +78,7 @@ def test_retry_that_still_finds_nothing_stays_partial() -> None:
     """The information genuinely isn't in the corpus — retry gets one honest attempt,
     then the gap is still reported, not silently retried forever."""
     llm = _FakeLLM(
-        "Who is Drona?\nWhat is Drona's favorite color?",
+        "NONE\nPARALLEL\nWho is Drona?\nWhat is Drona's favorite color?",
         retry_replies=["What color does Drona prefer?"],
     )
     pipeline = _pipeline_stub(llm)
@@ -87,7 +87,7 @@ def test_retry_that_still_finds_nothing_stays_partial() -> None:
         "What is Drona's favorite color?": _CandidateState([0.0], [], [], []),
         "What color does Drona prefer?": _CandidateState([0.0], [], [], []),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("who is Drona, and what is his favorite color?", "demo")
@@ -103,11 +103,11 @@ def test_retry_that_still_finds_nothing_stays_partial() -> None:
 def test_retry_rewrite_returning_the_same_text_is_not_retried_again() -> None:
     """A rewrite failure (LLMClient falls back to the original text) must not be treated
     as a distinct retry attempt — no new retrieval call, no phantom timing key."""
-    llm = _FakeLLM("Who is Drona?\nHow is Drona different from Kripa?", retry_replies=[])
+    llm = _FakeLLM("NONE\nPARALLEL\nWho is Drona?\nHow is Drona different from Kripa?", retry_replies=[])
     pipeline = _pipeline_stub(llm)
     calls: list[str] = []
 
-    def fake_retrieve_candidates(q: str, space_id: str) -> _CandidateState:
+    def fake_retrieve_candidates(q: str, space_id: str, **_kw) -> _CandidateState:
         calls.append(q)
         if q == "Who is Drona?":
             return _CandidateState([0.0], [], [], [(_chunk("d1"), 0.9)])
@@ -129,7 +129,7 @@ def test_single_question_never_retries() -> None:
     existing sufficiency-detection scope."""
     llm = _FakeLLM("SINGLE")
     pipeline = _pipeline_stub(llm)
-    pipeline._retrieve_candidates = lambda q, space_id: _CandidateState([0.0], [], [], [])
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: _CandidateState([0.0], [], [], [])
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("what does the Router class do?", "demo")

@@ -54,7 +54,7 @@ def _stub_finish(pipeline: Pipeline) -> None:
 
 def test_sequential_hop2_resolves_placeholder_from_hop1_top_chunk() -> None:
     llm = _FakeLLM(
-        "SEQUENTIAL\nWhich department had the most failures?\n"
+        "NONE\nSEQUENTIAL\nWhich department had the most failures?\n"
         "What policy caused failures in {hop1}?",
         resolve_replies=["What policy caused failures in Engineering?"],
     )
@@ -67,7 +67,7 @@ def test_sequential_hop2_resolves_placeholder_from_hop1_top_chunk() -> None:
             [0.0], [], [], [(_chunk("p1", "Hiring freeze policy"), 0.8)]
         ),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve(
@@ -84,7 +84,7 @@ def test_sequential_hop1_found_nothing_falls_back_to_hop1_question_text() -> Non
     from — fall back to substituting hop 1's own question text rather than sending a
     literal unresolved "{hop1}" string to the embedder."""
     llm = _FakeLLM(
-        "SEQUENTIAL\nWhich department had the most failures?\n"
+        "NONE\nSEQUENTIAL\nWhich department had the most failures?\n"
         "What policy caused failures in {hop1}?"
     )
     pipeline = _pipeline_stub(llm)
@@ -94,7 +94,7 @@ def test_sequential_hop1_found_nothing_falls_back_to_hop1_question_text() -> Non
             [0.0], [], [], []
         ),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve(
@@ -107,7 +107,7 @@ def test_sequential_hop1_found_nothing_falls_back_to_hop1_question_text() -> Non
 
 def test_sequential_hop2_without_placeholder_gets_hop1_context_prefixed() -> None:
     llm = _FakeLLM(
-        "SEQUENTIAL\nWho won the award?\nWhat team do they play for?"
+        "NONE\nSEQUENTIAL\nWho won the award?\nWhat team do they play for?"
     )
     pipeline = _pipeline_stub(llm)
     states_by_q = {
@@ -116,7 +116,7 @@ def test_sequential_hop2_without_placeholder_gets_hop1_context_prefixed() -> Non
             [0.0], [], [], [(_chunk("t1", "Riverside FC"), 0.9)]
         ),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("who won the award, and what team do they play for?", "demo")
@@ -128,7 +128,7 @@ def test_sequential_hop2_without_placeholder_gets_hop1_context_prefixed() -> Non
 def test_sequential_reranked_chunk_code_is_truncated_and_whitespace_collapsed() -> None:
     long_code = ("line one\n" * 40) + "the answer is Engineering"
     llm = _FakeLLM(
-        "SEQUENTIAL\nWhich department had the most failures?\n"
+        "NONE\nSEQUENTIAL\nWhich department had the most failures?\n"
         "What policy caused failures in {hop1}?"
     )
     pipeline = _pipeline_stub(llm)
@@ -141,7 +141,7 @@ def test_sequential_reranked_chunk_code_is_truncated_and_whitespace_collapsed() 
             [0.0], [], [], [(_chunk("p1", "Hiring freeze"), 0.8)]
         ),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve(
@@ -156,7 +156,7 @@ def test_sequential_hop_context_concatenates_top_three_reranked_chunks() -> None
     alone often doesn't contain the specific answer even when a lower-ranked chunk in
     hop 1's own top-k does, so _hop_context pools the top 3."""
     llm = _FakeLLM(
-        "SEQUENTIAL\nWho is Arjuna's charioteer?\nWhat advice did {hop1} give?"
+        "NONE\nSEQUENTIAL\nWho is Arjuna's charioteer?\nWhat advice did {hop1} give?"
     )
     pipeline = _pipeline_stub(llm)
     expected_context = "The chariot thundered onward. Krishna, Arjuna's charioteer, spoke. Kaurava forces massed nearby."
@@ -173,7 +173,7 @@ def test_sequential_hop_context_concatenates_top_three_reranked_chunks() -> None
             [0.0], [], [], [(_chunk("a1", "advice"), 0.8)]
         ),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("who is Arjuna's charioteer, and what advice did they give?", "demo")
@@ -183,7 +183,7 @@ def test_sequential_hop_context_concatenates_top_three_reranked_chunks() -> None
 
 def test_sequential_three_hop_chain_resolves_each_placeholder_from_the_previous_hop() -> None:
     llm = _FakeLLM(
-        "SEQUENTIAL\nWhich department had the most failures?\n"
+        "NONE\nSEQUENTIAL\nWhich department had the most failures?\n"
         "What policy caused failures in {hop1}?\nWho approved {hop2}?",
         resolve_replies=[
             "What policy caused failures in Engineering?",
@@ -202,7 +202,7 @@ def test_sequential_three_hop_chain_resolves_each_placeholder_from_the_previous_
             [0.0], [], [], [(_chunk("a1", "The CFO approved it"), 0.7)]
         ),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve(

@@ -69,23 +69,29 @@ export function RagEmbedding({ embedding, label }) {
   );
 }
 
-export function RagCode({ code, startLine }) {
+export function RagCode({ code, startLine, highlightLine }) {
   const lines = code.split("\n");
   return (
     <pre className="rag-code">
-      {lines.map((line, i) => (
-        <span className="rag-code__line" key={i}>
-          <span className="rag-code__ln">{startLine != null ? startLine + i : ""}</span>
-          <span className="rag-code__src">{line || " "}</span>
-        </span>
-      ))}
+      {lines.map((line, i) => {
+        const lineNum = startLine != null ? startLine + i : null;
+        return (
+          <span
+            className={cls("rag-code__line", lineNum === highlightLine && "rag-code__line--highlight")}
+            key={i}
+          >
+            <span className="rag-code__ln">{lineNum ?? ""}</span>
+            <span className="rag-code__src">{line || " "}</span>
+          </span>
+        );
+      })}
     </pre>
   );
 }
 
 // mode: "full" (chunk + code, default), "context" (context header emphasized, code collapsed),
 // "embedOnly" (compact row: location + embedding, no code)
-export function RagChunkCard({ chunk, embedding, scores, badge, mode = "full", defaultOpen }) {
+export function RagChunkCard({ chunk, embedding, scores, badge, mode = "full", defaultOpen, highlightLine }) {
   const [open, setOpen] = useState(!!defaultOpen);
 
   if (mode === "embedOnly") {
@@ -125,7 +131,7 @@ export function RagChunkCard({ chunk, embedding, scores, badge, mode = "full", d
           {mode === "full" && chunk.context_header && (
             <p className="rag-chunk__context">&ldquo;{chunk.context_header}&rdquo;</p>
           )}
-          <RagCode code={chunk.code} startLine={chunk.start_line} />
+          <RagCode code={chunk.code} startLine={chunk.start_line} highlightLine={highlightLine} />
           {embedding && <RagEmbedding embedding={embedding} />}
         </div>
       )}

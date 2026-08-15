@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.config import Settings
+from src.generate.provenance import ClaimAttributor
 from src.index.schema import CodeChunk
 from src.pipeline import Pipeline, _RetrievalState
 from src.trace import AnswerTrace
@@ -30,7 +31,7 @@ class FakeAnswerGenerator:
         self.fail = fail
         self.build_prompt_calls = 0
 
-    def answer_stream(self, question, chunks, history=None, insufficient=None):
+    def answer_stream(self, question, chunks, history=None, insufficient=None, wants_chart=False):
         yield from self.deltas
         if self.fail:
             raise RuntimeError("stream dropped")
@@ -47,13 +48,18 @@ class FakeAnswerGenerator:
 class _FakeLLM:
     last_usage: dict | None = None
 
+    def complete(self, prompt: str, system: str | None = None) -> str:
+        return ""
+
 
 def _pipeline_stub(answer_generator, retrieval_state: _RetrievalState) -> Pipeline:
     pipeline = Pipeline.__new__(Pipeline)
     pipeline.settings = Settings()
     pipeline.answer_generator = answer_generator
     pipeline.llm = _FakeLLM()
-    pipeline._retrieve = lambda question, space_id: retrieval_state
+    pipeline.bulk_llm = _FakeLLM()
+    pipeline.claim_attributor = ClaimAttributor(pipeline.bulk_llm)
+    pipeline._retrieve = lambda question, space_id, *a, **k: retrieval_state
     return pipeline
 
 

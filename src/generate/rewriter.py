@@ -1,46 +1,88 @@
 from __future__ import annotations
 
+from src.generate.decomposer import (
+    DecomposeResult,
+    FLAG_BROAD,
+    MAX_HOPS,
+    META_MARKER,
+    PARALLEL_MARKER,
+    ROUTE_GRAMMAR,
+    SEQUENTIAL_MARKER,
+    SINGLE_SENTINEL,
+    parse_route_header,
+)
 from src.llm_client import LLMClient
 
-# A fixed sentinel, not a keyword list: users phrase "summarize this chat" in unbounded
-# ways ("what's the gist of our talk", "recap what we've covered"...), and no literal
-# match list keeps up. Folded into the rewrite call instead of a separate classifier
-# call — it already runs on every follow-up turn, so this adds zero extra LLM calls.
-META_SENTINEL = "META_CONVERSATION_QUESTION"
-
 SYSTEM_PROMPT = (
-    "First decide: is the latest question asking about THIS CONVERSATION itself — what "
-    "was discussed, who was mentioned, a summary/recap of the chat — rather than about "
-    f"the source document? If so, reply with exactly: {META_SENTINEL}\n"
-    "Otherwise, rewrite the latest question into a standalone question that can be "
-    "understood without the earlier conversation, by resolving pronouns and implicit "
-    "references using the conversation history. Preserve the user's intent exactly — do "
-    "not answer the question, expand its scope, or add assumptions. Reply with only the "
-    "rewritten question, no preamble."
+    "You classify and resolve the latest question in a conversation before retrieval "
+    "runs, so the pipeline can pick the right strategy for it — the same job "
+    "QueryDecomposer does on turn 1, extended to also resolve history.\n"
+    "First: is the latest question asking specifically about THIS CONVERSATION's own "
+    "history — what was discussed, who was mentioned, a recap of the chat itself — or a "
+    "greeting/capability question about the assistant? A request to summarize or "
+    "overview the DOCUMENT/SOURCE MATERIAL is NOT this case, even if it uses the word "
+    "\"summary\" or \"overview\" — that is a normal document question about the source, "
+    f"classify it {FLAG_BROAD} below instead. If it genuinely is about the conversation "
+    f"or the assistant itself, reply with exactly: {META_MARKER}\n"
+    f"Otherwise, reply with:\n{ROUTE_GRAMMAR}\n"
+    "In every case below, resolve pronouns and implicit references against the "
+    "conversation history — retrieval only ever sees what you write here, never the raw "
+    "history. Preserve the user's intent exactly — do not answer the question, expand "
+    "its scope, or add assumptions.\n"
+    f"If line 2 is {SINGLE_SENTINEL}: one more line — the question rewritten as a "
+    "standalone question.\n"
+    f"If line 2 is {PARALLEL_MARKER}: list at most 3 self-contained sub-questions, one "
+    "per line.\n"
+    f"If line 2 is {SEQUENTIAL_MARKER}: list 2 or 3 lines, one per hop — the first hop's "
+    "self-contained question, then each later hop's question written with a {hop1}, "
+    "{hop2}, etc. placeholder wherever it depends on that earlier hop's answer. Most "
+    "chains are only 2 hops.\n"
+    "Do not add numbering or preamble."
 )
 
 
 class StandaloneRewriter:
-    """Collapses (history, follow-up question) into one self-contained question — the
-    only thing retrieval ever embeds. Skipped on turn 1: there's nothing to resolve.
+    """The turn-2+ half of query routing (see QueryDecomposer for turn 1) — one cheap LLM
+    call that resolves history-dependent references ("there", "it") into self-contained
+    question(s) AND classifies the same signals QueryDecomposer does (mode, is_meta,
+    is_broad, wants_chart) via the same shared grammar (see ROUTE_GRAMMAR), so a question
+    is routed identically regardless of which turn it's asked on.
 
-    Also classifies meta/about-the-conversation questions as a side effect of this same
-    call (see META_SENTINEL) — no separate LLM call for that."""
+    Skipped entirely when history is empty — that's QueryDecomposer's job instead — so a
+    turn-1 question never pays for two classification calls."""
 
-    def __init__(self, llm: LLMClient):
+    def __init__(self, llm: LLMClient, max_subquestions: int):
         self.llm = llm
+        self.max_subquestions = max_subquestions
 
-    def rewrite(self, question: str, history: list[tuple[str, str]]) -> tuple[bool, str]:
-        """Returns (is_meta, text). text is the standalone question, or the original
-        question unchanged when is_meta is True, on turn 1, or on LLM failure."""
+    def rewrite(self, question: str, history: list[tuple[str, str]]) -> DecomposeResult:
         if not history:
-            return False, question
+            return DecomposeResult("single", [question])
         transcript = "\n".join(f"{role}: {content}" for role, content in history)
         prompt = f"Conversation so far:\n{transcript}\n\nLatest question: {question}"
         try:
             reply = self.llm.complete(prompt, system=SYSTEM_PROMPT).strip()
         except RuntimeError:
-            return False, question
-        if reply == META_SENTINEL:
-            return True, question
-        return False, reply or question
+            return DecomposeResult("single", [question])
+        if not reply:
+            return DecomposeResult("single", [question])
+
+        lines = [p for p in (line.strip("-•* \t") for line in reply.splitlines()) if p]
+        if not lines:
+            return DecomposeResult("single", [question])
+        if lines[0].strip().upper() == META_MARKER:
+            return DecomposeResult("single", [question], is_meta=True)
+
+        is_broad, wants_chart, mode, rest = parse_route_header(lines)
+        if mode == SEQUENTIAL_MARKER:
+            hops = rest[:MAX_HOPS]
+            if len(hops) > 1:
+                return DecomposeResult("sequential", hops, is_broad=is_broad, wants_chart=wants_chart)
+        elif mode == PARALLEL_MARKER:
+            parts = rest[: self.max_subquestions]
+            if len(parts) > 1:
+                return DecomposeResult("parallel", parts, is_broad=is_broad, wants_chart=wants_chart)
+        # SINGLE (or anything unrecognized): one more line — the rewritten standalone
+        # question — falls back to the raw question if the model omitted it.
+        standalone = rest[0] if rest else question
+        return DecomposeResult("single", [standalone], is_broad=is_broad, wants_chart=wants_chart)

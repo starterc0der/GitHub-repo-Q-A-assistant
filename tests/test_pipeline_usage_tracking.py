@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.config import Settings
-from src.generate.decomposer import RETRY_REWRITE_SYSTEM_PROMPT, QueryDecomposer
+from src.generate.decomposer import RETRY_REWRITE_SYSTEM_PROMPT, DecomposeResult, QueryDecomposer
 from src.index.schema import CodeChunk
 from src.pipeline import Pipeline, _CandidateState, _RetrievalState, _add_usage
 
@@ -46,31 +46,32 @@ def _pipeline_stub(bulk_llm: _FakeLLM) -> Pipeline:
     return pipeline
 
 
-def test_decompose_skip_does_not_pick_up_a_stale_previous_usage() -> None:
-    """Regression guard: a simple (non-compound) question skips the LLM call entirely
-    via the keyword pre-filter, so last_usage must not still hold whatever an EARLIER,
-    unrelated call left behind — that would misattribute someone else's cost to this
-    question's decompose stage."""
+def test_pre_routed_decompose_result_does_not_pick_up_stale_bulk_llm_usage() -> None:
+    """Regression guard: when the caller already classified this turn (see
+    Pipeline.route_question) and passes decompose_result straight through, _retrieve()
+    must not call decompose() again or read self.bulk_llm.last_usage at all — that would
+    misattribute some EARLIER, unrelated call's cost to this question's decompose stage."""
     bulk_llm = _FakeLLM()
     bulk_llm.last_usage = {"prompt_tokens": 999, "completion_tokens": 999}  # stale leftover
     pipeline = _pipeline_stub(bulk_llm)
     candidate = _CandidateState(query_vector=[0.0], routed=[], scored_candidates=[], reranked_scored=[])
-    pipeline._retrieve_candidates = lambda question, space_id: candidate
+    pipeline._retrieve_candidates = lambda question, space_id, **_kw: candidate
     pipeline._finish_retrieval = lambda *a, **k: _RetrievalState(
         query_vector=[0.0], routed=[], scored_candidates=[], reranked_scored=[],
         final_chunks=[], final_chunk_traces=[], wide_fallback=False,
         wide_fallback_reason="", too_large_message=None,
     )
+    route = DecomposeResult("single", ["what does the Router class do?"])
 
-    state = pipeline._retrieve("what does the Router class do?", "demo")
+    state = pipeline._retrieve("what does the Router class do?", "demo", decompose_result=route)
 
-    assert bulk_llm.calls == 0  # keyword pre-filter never thought this was compound
+    assert bulk_llm.calls == 0  # pre-routed — _retrieve never calls decompose() itself
     assert state.tokens == {}
     assert "decompose" in state.timings
 
 
 def test_decompose_that_actually_fires_records_its_own_usage() -> None:
-    bulk_llm = _FakeLLM(reply="What does X do?\nWhat does Y do?")
+    bulk_llm = _FakeLLM(reply="NONE\nPARALLEL\nWhat does X do?\nWhat does Y do?")
     pipeline = _pipeline_stub(bulk_llm)
     # Non-empty reranked_scored: both sub-questions found evidence, so sufficiency stays
     # "sufficient" and the retry pass never fires — this test is only about decompose's
@@ -82,7 +83,7 @@ def test_decompose_that_actually_fires_records_its_own_usage() -> None:
     candidate = _CandidateState(
         query_vector=[0.0], routed=[], scored_candidates=[], reranked_scored=[(chunk, 0.9)]
     )
-    pipeline._retrieve_candidates = lambda question, space_id: candidate
+    pipeline._retrieve_candidates = lambda question, space_id, **_kw: candidate
     pipeline._merge_candidates = lambda sub_qs, states: (candidate, {}, {}, {})
     pipeline._finish_retrieval = lambda *a, **k: _RetrievalState(
         query_vector=[0.0], routed=[], scored_candidates=[], reranked_scored=[],

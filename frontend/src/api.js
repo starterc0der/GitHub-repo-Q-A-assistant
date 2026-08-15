@@ -85,7 +85,10 @@ export const messageVectors = (id) => request(`/messages/${id}/vectors`);
 
 // ----------------------------------------------------------------- insights
 
-export const spaceInsights = (spaceId) => request(`/spaces/${spaceId}/insights`);
+export const spaceInsights = (spaceId, range) => {
+  const qs = range?.start && range?.end ? `?start=${range.start}&end=${range.end}` : "";
+  return request(`/spaces/${spaceId}/insights${qs}`);
+};
 export const chatInsights = (spaceId, chatId) => request(`/spaces/${spaceId}/chats/${chatId}/insights`);
 export const chunkInsights = (spaceId) => request(`/spaces/${spaceId}/insights/chunks`);
 

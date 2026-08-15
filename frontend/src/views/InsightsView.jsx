@@ -23,6 +23,10 @@ function fmtPct(x) {
   return `${Math.round((x || 0) * 100)}%`;
 }
 
+function fmtDateShort(iso) {
+  return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 // Manages which of the two dashboard levels is showing (space overview or one chat's
 // question list) plus the question-detail overlay, which reuses the existing
 // PipelineOverlay unchanged — same merge-cache-fields-onto-the-trace pattern the chat
@@ -35,13 +39,19 @@ export function useInsightsController(spaceId) {
   const [error, setError] = useState(null);
   const [trace, setTrace] = useState(null);
   const [loadingTraceId, setLoadingTraceId] = useState(null);
+  // {start, end} once resolved from the backend's own default (last 14 days) — null
+  // means "not resolved yet", never a stale value from a previous space, since
+  // refreshSpace always takes the range to use as an explicit argument rather than
+  // reading this state itself.
+  const [range, setRange] = useState(null);
 
-  function refreshSpace() {
+  function refreshSpace(explicitRange) {
     setError(null);
-    Promise.all([spaceInsights(spaceId), chunkInsights(spaceId)])
+    Promise.all([spaceInsights(spaceId, explicitRange), chunkInsights(spaceId)])
       .then(([space, chunks]) => {
         setSpaceData(space);
         setChunkData(chunks);
+        setRange({ start: space.range_start, end: space.range_end });
       })
       .catch((err) => setError(err.message));
   }
@@ -49,9 +59,14 @@ export function useInsightsController(spaceId) {
   useEffect(() => {
     setChatId(null);
     setChatData(null);
-    refreshSpace();
+    setRange(null);
+    refreshSpace(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaceId]);
+
+  function setDateRange(start, end) {
+    refreshSpace({ start, end });
+  }
 
   function openChat(id) {
     setChatId(id);
@@ -64,7 +79,7 @@ export function useInsightsController(spaceId) {
   function backToSpace() {
     setChatId(null);
     setChatData(null);
-    refreshSpace();
+    refreshSpace(range);
   }
 
   async function openQuestion(row) {
@@ -83,8 +98,8 @@ export function useInsightsController(spaceId) {
   }
 
   return {
-    chatId, spaceData, chunkData, chatData, error, trace, setTrace, loadingTraceId,
-    refreshSpace, openChat, backToSpace, openQuestion,
+    chatId, spaceData, chunkData, chatData, error, trace, setTrace, loadingTraceId, range,
+    refreshSpace, setDateRange, openChat, backToSpace, openQuestion,
   };
 }
 
@@ -122,13 +137,13 @@ function pointsFor(byDay, pctField, x0, x1, y0, y1) {
     .filter(Boolean);
 }
 
-function GateOutcomeTrend({ gateOutcomes, gateOutcomesByDay }) {
+function GateOutcomeTrend({ gateOutcomes, gateOutcomesByDay, rangeDayCount, rangeStartLabel, rangeEndLabel }) {
   const total = Object.values(gateOutcomes).reduce((a, b) => a + b, 0);
   const X0 = 34, X1 = 290, Y_TOP = 10, Y_BOTTOM = 100;
 
   return (
     <div className="rag-insight-panel">
-      <div className="rag-insight-panel__title">Gate outcomes (14d)</div>
+      <div className="rag-insight-panel__title">Gate outcomes ({rangeDayCount}d)</div>
       <div className="rag-gate-trend__legend">
         {GATE_KEYS.map((k) => (
           <span key={k} className="rag-gate-bar__legend-item">
@@ -165,8 +180,8 @@ function GateOutcomeTrend({ gateOutcomes, gateOutcomesByDay }) {
               </g>
             );
           })}
-          <text x={X0} y="116" className="rag-chart__value">14d ago</text>
-          <text x={X1} y="116" textAnchor="end" className="rag-chart__value">Today</text>
+          <text x={X0} y="116" className="rag-chart__value">{rangeStartLabel}</text>
+          <text x={X1} y="116" textAnchor="end" className="rag-chart__value">{rangeEndLabel}</text>
         </svg>
       )}
     </div>
@@ -198,6 +213,93 @@ function StageLatencyPanel({ stageLatency }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// Single line, total tokens (prompt + completion) per day — real daily sums from stored
+// traces, not an estimate. A day with zero questions is a genuine 0, not a gap, unlike
+// the gate/cache-hit trends: token usage has no "no data" vs. "data but zero" distinction
+// to preserve.
+function TokenUsageTrend({ tokensByDay, rangeDayCount, rangeStartLabel, rangeEndLabel }) {
+  const X0 = 34, X1 = 290, Y_TOP = 10, Y_BOTTOM = 100;
+  const totals = tokensByDay.map((d) => d.prompt_tokens + d.completion_tokens);
+  const grandTotal = totals.reduce((a, b) => a + b, 0);
+  const maxTotal = Math.max(...totals, 1) * 1.1;
+  const n = totals.length;
+  const points = totals.map((v, i) => ({
+    x: n > 1 ? X0 + (i / (n - 1)) * (X1 - X0) : (X0 + X1) / 2,
+    y: Y_BOTTOM - (v / maxTotal) * (Y_BOTTOM - Y_TOP),
+  }));
+
+  return (
+    <div className="rag-insight-panel">
+      <div className="rag-insight-panel__title">Token usage trend ({rangeDayCount}d)</div>
+      <p className="rag-hint" style={{ margin: "-8px 0 10px" }}>{grandTotal.toLocaleString()} tokens over {rangeDayCount}d</p>
+      <svg viewBox="0 0 300 122" className="rag-gate-trend__svg">
+        <line x1={X0} y1={Y_TOP} x2={X1} y2={Y_TOP} className="rag-chart__axis" />
+        <line x1={X0} y1="55" x2={X1} y2="55" className="rag-chart__axis" />
+        <line x1={X0} y1={Y_BOTTOM} x2={X1} y2={Y_BOTTOM} className="rag-chart__axis" />
+        <line x1={X0} y1={Y_TOP} x2={X0} y2={Y_BOTTOM} className="rag-chart__axis" />
+        <text x={X0 - 5} y={Y_TOP + 3} textAnchor="end" className="rag-chart__value">{Math.round(maxTotal).toLocaleString()}</text>
+        <text x={X0 - 5} y={Y_BOTTOM + 3} textAnchor="end" className="rag-chart__value">0</text>
+        <polyline
+          points={points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")}
+          fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+        />
+        <text x={X0} y="116" className="rag-chart__value">{rangeStartLabel}</text>
+        <text x={X1} y="116" textAnchor="end" className="rag-chart__value">{rangeEndLabel}</text>
+      </svg>
+    </div>
+  );
+}
+
+// Bar height is a real 0-100% share (not normalized to the visible range's own max) so a
+// low-hit-rate stretch reads as genuinely low, not stretched to look full — same honesty
+// convention as GateOutcomeTrend's fixed 0-100% axis. A day with no questions gets a
+// faint placeholder bar, distinguishable from a real 0% day.
+function CacheHitHistogram({ cacheHitByDay, rangeDayCount, rangeStartLabel, rangeEndLabel }) {
+  return (
+    <div className="rag-insight-panel" style={{ display: "flex", flexDirection: "column" }}>
+      <div className="rag-insight-panel__title">Cache hit rate by day ({rangeDayCount}d)</div>
+      <div className="rag-cache-hist">
+        {cacheHitByDay.map((d) => {
+          const hasData = d.hit_rate != null;
+          const label = hasData
+            ? `${fmtDateShort(d.date)}: ${fmtPct(d.hit_rate)} cache hit`
+            : `${fmtDateShort(d.date)}: no questions`;
+          return (
+            <div className="rag-cache-hist__col" key={d.date} title={label}>
+              <div
+                className={cls("rag-cache-hist__bar", !hasData && "rag-cache-hist__bar--empty")}
+                style={{ height: `${Math.round((d.hit_rate || 0) * 100)}%` }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="rag-cache-hist__axis">
+        <span>{rangeStartLabel}</span><span>{rangeEndLabel}</span>
+      </div>
+    </div>
+  );
+}
+
+function DateRangePicker({ range, minDate, maxDate, dayCount, onChange }) {
+  if (!range) return null;
+  return (
+    <div className="rag-date-range">
+      <span className="rag-date-range__label">Date range</span>
+      <input
+        type="date" className="rag-date-range__input" value={range.start}
+        min={minDate} max={range.end} onChange={(e) => onChange(e.target.value, range.end)}
+      />
+      <span className="rag-dim">to</span>
+      <input
+        type="date" className="rag-date-range__input" value={range.end}
+        min={range.start} max={maxDate} onChange={(e) => onChange(range.start, e.target.value)}
+      />
+      <span className="rag-hint" style={{ margin: 0 }}>{dayCount} day{dayCount === 1 ? "" : "s"} selected</span>
     </div>
   );
 }
@@ -283,13 +385,20 @@ function ChunkExplorer({ chunkData }) {
 }
 
 export function SpaceInsightsView({ ctl }) {
-  const { spaceData, chunkData, error, openChat } = ctl;
+  const { spaceData, chunkData, error, openChat, range, setDateRange } = ctl;
   if (error) return <p className="rag-error" style={{ margin: 24 }}>{error}</p>;
   if (!spaceData) return <p className="rag-hint" style={{ margin: 24 }}>Loading…</p>;
+
+  const rangeStartLabel = fmtDateShort(spaceData.range_start);
+  const rangeEndLabel = fmtDateShort(spaceData.range_end);
 
   return (
     <div className="rag-insights">
       <p className="rag-hint" style={{ margin: "0 0 16px" }}>This space's retrieval pipeline, aggregated.</p>
+      <DateRangePicker
+        range={range} minDate={spaceData.range_min_date} maxDate={spaceData.range_max_date}
+        dayCount={spaceData.range_day_count} onChange={setDateRange}
+      />
       <div className="rag-insight-cards">
         <StatCard label="Cache hit rate" value={fmtPct(spaceData.cache_hit_rate)} />
         <StatCard label="Decomposition rate" value={fmtPct(spaceData.decomposition_rate)} />
@@ -300,8 +409,21 @@ export function SpaceInsightsView({ ctl }) {
         />
       </div>
       <div className="rag-insight-row">
-        <GateOutcomeTrend gateOutcomes={spaceData.gate_outcomes} gateOutcomesByDay={spaceData.gate_outcomes_by_day} />
+        <GateOutcomeTrend
+          gateOutcomes={spaceData.gate_outcomes} gateOutcomesByDay={spaceData.gate_outcomes_by_day}
+          rangeDayCount={spaceData.range_day_count} rangeStartLabel={rangeStartLabel} rangeEndLabel={rangeEndLabel}
+        />
         <StageLatencyPanel stageLatency={spaceData.stage_latency} />
+      </div>
+      <div className="rag-insight-row">
+        <TokenUsageTrend
+          tokensByDay={spaceData.tokens_by_day} rangeDayCount={spaceData.range_day_count}
+          rangeStartLabel={rangeStartLabel} rangeEndLabel={rangeEndLabel}
+        />
+        <CacheHitHistogram
+          cacheHitByDay={spaceData.cache_hit_by_day} rangeDayCount={spaceData.range_day_count}
+          rangeStartLabel={rangeStartLabel} rangeEndLabel={rangeEndLabel}
+        />
       </div>
       <ChatsTable chats={spaceData.chats} onSelect={openChat} />
       <ChunkExplorer chunkData={chunkData} />

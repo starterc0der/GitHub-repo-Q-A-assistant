@@ -12,9 +12,10 @@ from pathlib import Path
 from src.cancellation import Cancelled, check
 from src.config import Settings
 from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator
-from src.generate.decomposer import QueryDecomposer
+from src.generate.decomposer import DecomposeResult, QueryDecomposer
 from src.generate.faithfulness import FaithfulnessChecker, FaithfulnessResult
 from src.generate.intent import BroadIntentClassifier, matches_broad_keywords
+from src.generate.provenance import ClaimAttributor
 from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
 from src.index.doc_index import DocIndex
@@ -120,6 +121,11 @@ class _RetrievalState:
     # how sub_questions/timings.caption should be worded in the UI; every stage after
     # decompose treats sub_questions identically regardless of mode.
     decompose_mode: str = "single"
+    # From the same upfront classification — is_broad already decided whether hybrid+
+    # rerank ran at all (see _retrieve_candidates' skip_hybrid_rerank); wants_chart is
+    # passed into the answer prompt as an explicit hint. See DecomposeResult.
+    is_broad: bool = False
+    wants_chart: bool = False
 
 
 class Pipeline:
@@ -153,10 +159,11 @@ class Pipeline:
 
         self.summarizer = Summarizer(bulk_llm)
         self.contextualizer = Contextualizer(bulk_llm)
-        self.rewriter = StandaloneRewriter(bulk_llm)
+        self.rewriter = StandaloneRewriter(bulk_llm, settings.max_subquestions)
         self.intent_classifier = BroadIntentClassifier(bulk_llm)
         self.decomposer = QueryDecomposer(bulk_llm, settings.max_subquestions)
         self.faithfulness_checker = FaithfulnessChecker(bulk_llm)
+        self.claim_attributor = ClaimAttributor(bulk_llm)
 
         self.embedder = Embedder(settings.embedding_model)
         store = VectorStore(settings.qdrant_url)
@@ -436,27 +443,54 @@ class Pipeline:
         "specific, try naming a file, page, or topic you're looking for."
     )
 
-    def rewrite_standalone(self, question: str, history: list[tuple[str, str]]) -> tuple[bool, str]:
-        """One cheap LLM call that resolves history-dependent references ("there", "it")
-        into a self-contained question — the only thing retrieval ever sees. Skipped
-        entirely when history is empty, so single-shot questions pay nothing extra.
+    def route_question(
+        self, question: str, history: list[tuple[str, str]]
+    ) -> tuple[DecomposeResult, float, dict[str, int]]:
+        """The one classification call every turn makes before retrieval runs — decides
+        what KIND of question this is (meta/broad/chart/single/parallel/sequential) so
+        the rest of the pipeline can pick the right strategy instead of discovering it
+        partway through. Turn 1 (no history) and turn 2+ (has history) use different LLM
+        calls under the hood — QueryDecomposer vs. StandaloneRewriter, since only the
+        latter needs to resolve history-dependent references ("there", "it") — but both
+        speak the same grammar (see decomposer.ROUTE_GRAMMAR), so a question is
+        classified identically regardless of which turn it's asked on.
 
-        Returns (is_meta, text): is_meta means the question is about the conversation
-        itself ("what have we discussed") rather than the document — see answer_meta."""
-        return self.rewriter.rewrite(question, history)
+        Returns (result, ms, tokens) — the caller passes ms/tokens straight into
+        _retrieve() (see its decompose_ms/decompose_tokens params) so this call's cost
+        still shows up in the trace instead of vanishing just because the caller, not
+        _retrieve() itself, happened to make it.
 
-    # "What have we talked about" is a question about the CONVERSATION, not the document —
-    # the main answer prompt forbids using anything but retrieved chunks (so it always
-    # refuses these), and retrieval itself would just burn a request trying to match
-    # document content that was never the point. Bypasses retrieval entirely; bulk model,
-    # since this is a plain recall/summary over a few chat turns, not deep reasoning.
+        result.is_meta means the question is about the conversation/assistant itself
+        rather than the document — see answer_meta. For a meta question,
+        result.sub_questions[0] is just the original question, unused by the caller."""
+        self.bulk_llm.last_usage = None
+        started = time.monotonic()
+        result = self.decomposer.decompose(question) if not history else self.rewriter.rewrite(question, history)
+        ms = (time.monotonic() - started) * 1000
+        tokens: dict[str, int] = {}
+        _add_usage(tokens, self.bulk_llm.last_usage)
+        return result, ms, tokens
+
+    # Two different things share the is_meta bypass (see QueryDecomposer/StandaloneRewriter's
+    # shared grammar): a greeting/capability question ("hi", "what can you do") — which can
+    # happen turn 1, before any history exists — and "what have we talked about", which needs
+    # real history. Both skip retrieval entirely: the main answer prompt forbids using
+    # anything but retrieved chunks (so it would always refuse these), and retrieval itself
+    # would just burn a request trying to match document content that was never the point.
+    # Bulk model, since this is a plain greeting/recall/summary, not deep reasoning.
     META_CHAT_SYSTEM_PROMPT = (
-        "You are answering a question about THIS CONVERSATION so far — not about any "
-        "document. Answer using only the conversation history provided; do not claim or "
-        "invent anything about a source document beyond what was already said in this "
-        "chat. When asked what topics, people, or items were discussed, list only the "
-        "ones that were the actual subject of a question or a direct answer — not every "
-        "name that happened to appear in passing inside an answer's supporting detail. "
+        "You are answering a question about THIS CONVERSATION or about yourself as the "
+        "assistant — not about any source document.\n"
+        "If it's a greeting, thanks, or a question about what you can help with, answer "
+        "briefly and naturally: you answer questions about the documents/sources in this "
+        "space, grounded only in what's actually indexed there — invite them to ask "
+        "something about the material.\n"
+        "If it's a question about the conversation itself (what was discussed, who was "
+        "mentioned, a summary/recap), answer using only the conversation history "
+        "provided; do not claim or invent anything about a source document beyond what "
+        "was already said in this chat. List only topics/people/items that were the "
+        "actual subject of a question or a direct answer — not every name that happened "
+        "to appear in passing inside an answer's supporting detail.\n"
         "Be concise."
     )
 
@@ -511,6 +545,7 @@ class Pipeline:
     def _answer_trace(
         self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None,
         empty_message: str | None = None, insufficient: list[str] | None = None,
+        wants_chart: bool = False,
     ) -> AnswerTrace:
         """The answer call, wrapped so a failed generation still returns a viewable trace —
         every retrieval stage before it succeeded and is worth showing."""
@@ -518,15 +553,30 @@ class Pipeline:
             return AnswerTrace(text=empty_message or self.NO_MATCH, model=self.settings.llm_model)
         check()
         try:
-            answer = self.answer_generator.answer(question, chunks, history=history, insufficient=insufficient)
+            answer = self.answer_generator.answer(
+                question, chunks, history=history, insufficient=insufficient, wants_chart=wants_chart
+            )
         except RuntimeError as exc:
             return AnswerTrace(text="", model=self.settings.llm_model, error=str(exc))
-        return AnswerTrace(text=answer.text, model=self.settings.llm_model, chart=answer.chart)
+        citations = self.claim_attributor.attribute(answer.text, chunks)
+        return AnswerTrace(
+            text=answer.text, model=self.settings.llm_model, chart=answer.chart, citations=citations
+        )
 
-    def _retrieve_candidates(self, question: str, space_id: str) -> _CandidateState:
+    def _retrieve_candidates(
+        self, question: str, space_id: str, skip_hybrid_rerank: bool = False
+    ) -> _CandidateState:
         """Stages 1-4: embed→route→hybrid search→cross-rerank, for ONE question. Called
         once directly, or once per sub-question (in parallel) when the question was
-        decomposed — see _retrieve()."""
+        decomposed — see _retrieve().
+
+        skip_hybrid_rerank stops after routing, for a question the router already
+        classified as broad (see DecomposeResult.is_broad) — hybrid+rerank exist to find
+        the single best-matching chunk, which a "summarize this" question doesn't need,
+        and rerank is the single most expensive stage in this pipeline. Leaves
+        reranked_scored empty, which _finish_retrieval's existing "no chunk answered this
+        on its own" branch already reads as "go wide" when routing found something
+        relevant — so this needs no new downstream branching."""
         started = time.monotonic()
         timings: dict[str, float] = {}
         stage_started = started
@@ -546,6 +596,9 @@ class Pipeline:
         )
         file_paths = [file_path for file_path, _source_id, _score in routed]
         done("2/6 route", "route", f"{len(routed)} files shortlisted")
+
+        if skip_hybrid_rerank:
+            return _CandidateState(query_vector, routed, [], [], timings)
 
         scored_candidates = self.hybrid_search.search_scored(
             question, space_id, file_paths, self.settings.hybrid_candidate_k,
@@ -770,7 +823,10 @@ class Pipeline:
             tokens=tokens,
         )
 
-    def _retrieve(self, question: str, space_id: str) -> _RetrievalState:
+    def _retrieve(
+        self, question: str, space_id: str, decompose_result: DecomposeResult | None = None,
+        decompose_ms: float = 0.0, decompose_tokens: dict[str, int] | None = None,
+    ) -> _RetrievalState:
         """Runs decompose→embed→route→hybrid→rerank→compress — everything before
         generation. Split out so query_trace() (blocking) and query_trace_stream()
         (streaming) share one retrieval pass; only how the final answer text arrives
@@ -782,24 +838,34 @@ class Pipeline:
         either one. Each sub-question then runs stages 1-4 IN PARALLEL (bounded by
         max_subquestions), merges, and only then hits the shared compress/generate
         stages below. Most questions aren't compound — decompose() returns the question
-        unchanged — so this is the same single pass as before for the common case."""
+        unchanged — so this is the same single pass as before for the common case.
+
+        decompose_result lets a caller that already classified this turn (see
+        Pipeline.route_question, called once per turn in chat_routes.py) pass that result
+        straight through instead of paying for a second, redundant classification call —
+        decompose() only runs here as a fallback for callers that didn't pre-route (the
+        eval harness, direct pipeline tests). decompose_ms/decompose_tokens are that
+        pre-routed call's own cost, so it still shows up in this trace's "decompose"
+        timing/token totals instead of silently vanishing."""
         started = time.monotonic()
         logger.info("RETRIEVAL START | space=%s | question=%r", space_id, question)
         try:
-            # Reset first: decompose's keyword pre-filter skips the LLM call entirely for
-            # most questions, and without this last_usage would still hold whatever an
-            # earlier, unrelated call left behind.
-            self.bulk_llm.last_usage = None
-            decompose_started = time.monotonic()
-            decompose_result = self.decomposer.decompose(question)
-            decompose_ms = (time.monotonic() - decompose_started) * 1000
-            decompose_tokens: dict[str, int] = {}
-            _add_usage(decompose_tokens, self.bulk_llm.last_usage)
+            decompose_tokens = dict(decompose_tokens or {})
+            if decompose_result is None:
+                self.bulk_llm.last_usage = None
+                decompose_started = time.monotonic()
+                decompose_result = self.decomposer.decompose(question)
+                decompose_ms = (time.monotonic() - decompose_started) * 1000
+                _add_usage(decompose_tokens, self.bulk_llm.last_usage)
             mode = decompose_result.mode
 
             if mode == "single":
                 sub_questions = decompose_result.sub_questions
-                states = [self._retrieve_candidates(sub_questions[0], space_id)]
+                states = [
+                    self._retrieve_candidates(
+                        sub_questions[0], space_id, skip_hybrid_rerank=decompose_result.is_broad
+                    )
+                ]
                 decomposed: list[str] = []
             elif mode == "sequential":
                 # Each hop's query doesn't exist until the previous hop's own retrieval
@@ -909,6 +975,8 @@ class Pipeline:
             state.insufficient_sub_questions = insufficient_sub_qs
             state.retried_sub_questions = retried_sub_questions
             state.decompose_mode = mode
+            state.is_broad = decompose_result.is_broad
+            state.wants_chart = decompose_result.wants_chart
         except Cancelled:
             logger.warning(
                 "RETRIEVAL CANCELLED after %.1fs | question=%r", time.monotonic() - started, question
@@ -962,38 +1030,51 @@ class Pipeline:
             insufficient_sub_questions=state.insufficient_sub_questions,
             retried_sub_questions=state.retried_sub_questions,
             decompose_mode=state.decompose_mode,
+            is_broad=state.is_broad,
+            wants_chart=state.wants_chart,
         )
 
     def query_trace(
         self, question: str, space_id: str,
         raw_question: str | None = None, history: list[tuple[str, str]] | None = None,
+        decompose_result: DecomposeResult | None = None,
+        decompose_ms: float = 0.0, decompose_tokens: dict[str, int] | None = None,
     ) -> QueryTrace:
         """Runs the same retrieval stages as query(), returning every stage's intermediate
         scores/chunks alongside the final answer."""
         started = time.monotonic()
-        state = self._retrieve(question, space_id)
+        state = self._retrieve(question, space_id, decompose_result, decompose_ms, decompose_tokens)
         self.llm.last_usage = None
+        # Reset here too, not just before decompose/retry — _answer_trace's claim
+        # attribution call (see ClaimAttributor) is the last bulk_llm call in this
+        # request, and without this reset a stale value from an earlier stage would get
+        # double-counted into state.tokens below on any path that skips attribution.
+        self.bulk_llm.last_usage = None
         generate_started = time.monotonic()
         answer_trace = self._answer_trace(
             raw_question or question, state.final_chunks, history,
             empty_message=state.too_large_message, insufficient=state.insufficient_sub_questions,
+            wants_chart=state.wants_chart,
         )
         if state.final_chunks:
             state.timings["generate"] = (time.monotonic() - generate_started) * 1000
             _add_usage(state.tokens, self.llm.last_usage)
+            _add_usage(state.tokens, self.bulk_llm.last_usage)
         logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
         return self._build_query_trace(question, space_id, state, answer_trace, raw_question, history)
 
     def query_trace_stream(
         self, question: str, space_id: str,
         raw_question: str | None = None, history: list[tuple[str, str]] | None = None,
+        decompose_result: DecomposeResult | None = None,
+        decompose_ms: float = 0.0, decompose_tokens: dict[str, int] | None = None,
     ) -> Generator[str, None, QueryTrace]:
         """Same as query_trace(), but yields the answer's text deltas as they arrive
         instead of blocking for the full response. Once exhausted, the completed
         QueryTrace is available as the generator's return value (StopIteration.value) —
         built only once the full text (and its chart, if any) is known."""
         started = time.monotonic()
-        state = self._retrieve(question, space_id)
+        state = self._retrieve(question, space_id, decompose_result, decompose_ms, decompose_tokens)
 
         if not state.final_chunks:
             text = state.too_large_message or self.NO_MATCH
@@ -1002,18 +1083,24 @@ class Pipeline:
         else:
             check()
             self.llm.last_usage = None
+            # See query_trace()'s matching reset — without it a stale bulk_llm usage
+            # from an earlier stage would double-count into state.tokens below on the
+            # RuntimeError branch, which never reaches the attribution call.
+            self.bulk_llm.last_usage = None
             generate_started = time.monotonic()
             full_text = ""
             try:
                 for delta in self.answer_generator.answer_stream(
                     raw_question or question, state.final_chunks, history=history,
-                    insufficient=state.insufficient_sub_questions,
+                    insufficient=state.insufficient_sub_questions, wants_chart=state.wants_chart,
                 ):
                     full_text += delta
                     yield delta
                 answer = self.answer_generator.finalize(full_text)
+                citations = self.claim_attributor.attribute(answer.text, state.final_chunks)
                 answer_trace = AnswerTrace(
-                    text=answer.text, model=self.settings.llm_model, chart=answer.chart
+                    text=answer.text, model=self.settings.llm_model, chart=answer.chart,
+                    citations=citations,
                 )
             except RuntimeError as exc:
                 # Persist whatever streamed before the failure — that's what the user
@@ -1023,6 +1110,7 @@ class Pipeline:
                 )
             state.timings["generate"] = (time.monotonic() - generate_started) * 1000
             _add_usage(state.tokens, self.llm.last_usage)
+            _add_usage(state.tokens, self.bulk_llm.last_usage)
 
         logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
         return self._build_query_trace(question, space_id, state, answer_trace, raw_question, history)

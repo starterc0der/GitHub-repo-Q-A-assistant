@@ -5,12 +5,55 @@ import { useStageRunner } from "../hooks/useStageRunner.js";
 import { ingestStagesFor, IngestSections, IngestStageList } from "../views/IngestView.jsx";
 import { RETRIEVAL_STAGES, RetrievalSections, RetrievalStageList } from "../views/RetrievalView.jsx";
 
-// One overlay, two modes: a query trace (retrieval + generation, one question) or an
-// ingest trace (one source going in). Same stage-rail + scrollable-sections shell either
-// way — reusing RetrievalView/IngestView's stage bodies rather than re-deriving them.
+// A meta trace ({meta, question, history, answer_text}) has no retrieval stages at all —
+// this is literally the whole request: the raw transcript sent to the bulk model, and
+// what it answered. See Pipeline.answer_meta / META_CHAT_SYSTEM_PROMPT.
+function MetaSection({ data }) {
+  return (
+    <div className="rag-callout">
+      <span className="rag-callout__label">why no retrieval ran</span>
+      <p>
+        Classified upfront (before any retrieval stage) as a question about this
+        conversation or the assistant itself, not the source material — see
+        QueryDecomposer/StandaloneRewriter's shared routing grammar. The model answered
+        directly from the conversation transcript below.
+      </p>
+      <span className="rag-callout__label" style={{ marginTop: 14, display: "block" }}>
+        transcript sent to the model
+      </span>
+      <ul className="rag-ranked" style={{ marginTop: 6 }}>
+        {(data.history || []).map((turn, i) => (
+          <li key={i}>
+            <span className="rag-mono rag-ranked__path">
+              <strong>{turn.role}:</strong> {turn.content}
+            </span>
+          </li>
+        ))}
+        <li>
+          <span className="rag-mono rag-ranked__path">
+            <strong>user:</strong> {data.question}
+          </span>
+        </li>
+      </ul>
+      {data.answer_text && (
+        <div className="rag-answer" style={{ marginTop: 14 }}>
+          <span className="rag-callout__label">answer</span>
+          <p className="rag-answer__text">{data.answer_text}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One overlay, three shapes: a query trace (retrieval + generation, one question), an
+// ingest trace (one source going in), or a meta trace (a conversation/greeting question
+// that bypassed retrieval entirely — see Pipeline.answer_meta). Same stage-rail +
+// scrollable-sections shell for the first two — reusing RetrievalView/IngestView's stage
+// bodies rather than re-deriving them; meta has no stages at all, so it skips the rail.
 export function PipelineOverlay({ mode, data, title, onClose }) {
   const isQuery = mode === "query";
-  const stages = isQuery ? RETRIEVAL_STAGES : ingestStagesFor(data.kind);
+  const isMeta = isQuery && !!data.meta;
+  const stages = isMeta ? [] : isQuery ? RETRIEVAL_STAGES : ingestStagesFor(data.kind);
   const ids = stages.map((s) => s.id);
   const runner = useStageRunner(ids);
   const [current, setCurrent] = useState(ids[0]);
@@ -70,7 +113,9 @@ export function PipelineOverlay({ mode, data, title, onClose }) {
     <div className="rag-overlay" role="dialog" aria-modal="true">
       <header className="rag-overlay__head">
         <div>
-          <span className="rag-overlay__eyebrow">{isQuery ? "Retrieval pipeline" : "Ingestion pipeline"}</span>
+          <span className="rag-overlay__eyebrow">
+            {isMeta ? "Conversational answer — no retrieval" : isQuery ? "Retrieval pipeline" : "Ingestion pipeline"}
+          </span>
           <h2>{title}</h2>
         </div>
         <button className="rag-modal__close" onClick={requestClose} aria-label="Close">
@@ -96,24 +141,28 @@ export function PipelineOverlay({ mode, data, title, onClose }) {
         </div>
       )}
       <div className="rag-overlay__body">
-        <aside className="rag-overlay__rail">
-          {isQuery ? (
-            <RetrievalStageList data={data} statuses={runner.statuses} current={current} onSelect={selectStage} />
-          ) : (
-            <IngestStageList data={data} statuses={runner.statuses} current={current} onSelect={selectStage} />
-          )}
-          {isQuery && (
-            <button className="rag-vspace-cta" onClick={() => setShowVspace(true)}>
-              <span className="rag-vspace-cta__title">Visualize whole vector space</span>
-              <span className="rag-vspace-cta__desc">
-                Fullscreen walkthrough of every embedding in this space.
-              </span>
-            </button>
-          )}
-        </aside>
-        <main className="rag-overlay__content" ref={contentRef}>
-          <RagErrorBoundary key={mode} label={isQuery ? "Retrieval" : "Ingestion"}>
+        {!isMeta && (
+          <aside className="rag-overlay__rail">
             {isQuery ? (
+              <RetrievalStageList data={data} statuses={runner.statuses} current={current} onSelect={selectStage} />
+            ) : (
+              <IngestStageList data={data} statuses={runner.statuses} current={current} onSelect={selectStage} />
+            )}
+            {isQuery && (
+              <button className="rag-vspace-cta" onClick={() => setShowVspace(true)}>
+                <span className="rag-vspace-cta__title">Visualize whole vector space</span>
+                <span className="rag-vspace-cta__desc">
+                  Fullscreen walkthrough of every embedding in this space.
+                </span>
+              </button>
+            )}
+          </aside>
+        )}
+        <main className="rag-overlay__content" ref={contentRef}>
+          <RagErrorBoundary key={mode} label={isMeta ? "Conversational answer" : isQuery ? "Retrieval" : "Ingestion"}>
+            {isMeta ? (
+              <MetaSection data={data} />
+            ) : isQuery ? (
               <RetrievalSections data={data} visible={runner.visible} />
             ) : (
               <IngestSections data={data} visible={runner.visible} />

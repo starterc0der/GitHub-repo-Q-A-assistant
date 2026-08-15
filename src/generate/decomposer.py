@@ -7,41 +7,71 @@ from src.llm_client import LLMClient
 SINGLE_SENTINEL = "SINGLE"
 PARALLEL_MARKER = "PARALLEL"
 SEQUENTIAL_MARKER = "SEQUENTIAL"
+META_MARKER = "META"
+FLAG_BROAD = "BROAD"
+FLAG_CHART = "CHART"
 MAX_HOPS = 3  # caps latency/cost the same way the retry pass caps itself at one attempt
 
-# Cheap, free, catches the common phrasings before anything pays for an LLM call — mirrors
-# BroadIntentClassifier's keyword-first gate in intent.py.
-COMPOUND_HINTS = (" and ", " & ", "; ")
+# Shared by both QueryDecomposer (turn 1, no history) and StandaloneRewriter (turn 2+,
+# has history) so a question gets classified the same way regardless of when in the
+# conversation it's asked — only the SINGLE-mode payload differs (decompose reuses the
+# input question verbatim; rewrite must emit its own pronoun-resolved line), everything
+# else is one shared grammar.
+ROUTE_GRAMMAR = (
+    "Line 1: space-separated flags from {broad} (needs a wide summary/overview across "
+    "much of the source, not one specific fact) and {chart} (asks for a comparison, "
+    "graph, or chart). Write NONE if neither applies.\n"
+    "Line 2: {single} if it is genuinely one question; {parallel} if it is multiple "
+    "INDEPENDENT questions (different topics joined by \"and\", or a list of separate "
+    "asks, each answerable on its own without the others); {sequential} if answering a "
+    "later part REQUIRES the answer to an earlier part first — you could not even search "
+    "for it without already knowing that answer (e.g. \"which department had the most "
+    "failures, and what policy caused them?\" — you can't search for the policy until you "
+    "know which department)."
+).format(broad=FLAG_BROAD, chart=FLAG_CHART, single=SINGLE_SENTINEL, parallel=PARALLEL_MARKER, sequential=SEQUENTIAL_MARKER)
 
 DECOMPOSE_SYSTEM_PROMPT = (
-    "Decide how the question below breaks down.\n"
-    f"- If it is genuinely one question, reply with exactly: {SINGLE_SENTINEL}\n"
-    "- If it is multiple INDEPENDENT questions (different topics joined by \"and\", or a "
-    "list of separate asks, each answerable on its own without the others), reply "
-    f"\"{PARALLEL_MARKER}\" on the first line, then at most 3 self-contained sub-questions, "
-    "one per line — resolve pronouns like \"it\"/\"that\" against the original question.\n"
-    "- If answering a later part REQUIRES the answer to an earlier part first — you could not "
-    "even search for it without already knowing that answer (e.g. \"which department had the "
-    "most failures, and what policy caused them?\" — you can't search for the policy until you "
-    f"know which department) — reply \"{SEQUENTIAL_MARKER}\" on the first line, then 2 or 3 "
-    "lines, one per hop: the first hop's self-contained question, then each later hop's "
-    "question written with a {hop1}, {hop2}, etc. placeholder wherever it depends on that "
-    "earlier hop's answer (e.g. \"What policy caused failures in {hop1}?\") — most chains are "
-    "only 2 hops; use a third only when the question genuinely needs 3 sequential lookups.\n"
-    "Do not answer any of them, do not add numbering or preamble. Reply with only the mode "
-    "line and the sub-questions/hops, nothing else."
+    "You classify a question before retrieval runs, so the pipeline can pick the right "
+    "strategy for it.\n"
+    "First: is this question about THIS ASSISTANT itself — a greeting, thanks, or a "
+    "question about what the assistant can do — rather than about the source material? "
+    "A request to summarize or overview the DOCUMENT/SOURCE MATERIAL is NOT this case, "
+    f"even if it uses the word \"summary\" or \"overview\" — classify it {FLAG_BROAD} "
+    f"below instead. If it genuinely is about the assistant itself, reply with exactly: "
+    f"{META_MARKER}\n"
+    f"Otherwise, reply with:\n{ROUTE_GRAMMAR}\n"
+    f"If line 2 is {PARALLEL_MARKER}: list at most 3 self-contained sub-questions, one "
+    "per line, resolving pronouns like \"it\"/\"that\" against the original question.\n"
+    f"If line 2 is {SEQUENTIAL_MARKER}: list 2 or 3 lines, one per hop — the first hop's "
+    "self-contained question, then each later hop's question written with a {hop1}, "
+    "{hop2}, etc. placeholder wherever it depends on that earlier hop's answer (e.g. "
+    "\"What policy caused failures in {hop1}?\"). Most chains are only 2 hops.\n"
+    f"If line 2 is {SINGLE_SENTINEL}: no further lines.\n"
+    "Do not answer the question, do not add numbering or preamble."
 )
 
 
-def looks_compound(question: str) -> bool:
-    lowered = question.lower()
-    return lowered.count("?") > 1 or any(hint in lowered for hint in COMPOUND_HINTS)
+def parse_route_header(lines: list[str]) -> tuple[bool, bool, str, list[str]]:
+    """Parses the shared flags-line + mode-line header (see ROUTE_GRAMMAR) — returns
+    (is_broad, wants_chart, mode, remaining lines after the header). Shared by
+    QueryDecomposer and StandaloneRewriter so both interpret the same grammar
+    identically; each caller still owns what the remaining lines mean for SINGLE mode."""
+    if not lines:
+        return False, False, SINGLE_SENTINEL, []
+    flags = set(lines[0].strip().upper().split())
+    is_broad, wants_chart = FLAG_BROAD in flags, FLAG_CHART in flags
+    if len(lines) < 2:
+        return is_broad, wants_chart, SINGLE_SENTINEL, []
+    return is_broad, wants_chart, lines[1].strip().upper(), lines[2:]
 
 
 @dataclass
 class DecomposeResult:
     mode: str  # "single" | "parallel" | "sequential"
     sub_questions: list[str]
+    is_meta: bool = False
+    is_broad: bool = False
+    wants_chart: bool = False
 
 
 HOP_RESOLVE_SYSTEM_PROMPT = (
@@ -69,47 +99,57 @@ RETRY_REWRITE_SYSTEM_PROMPT = (
 
 
 class QueryDecomposer:
-    """Splits a compound question into sub-questions before retrieval — a single embedding
-    of "what does X do, and how is that different from Y?" is a blurry average of both
-    topics, which hurts routing and hybrid search for either one. Two different splits:
+    """The turn-1 half of query routing (see StandaloneRewriter for turn 2+) — one cheap
+    bulk-LLM call, always made (no keyword pre-filter), that classifies a question BEFORE
+    retrieval runs so the pipeline can pick the right strategy: is_meta (skip retrieval,
+    answer conversationally), is_broad (skip straight to the wide-source path instead of
+    paying for hybrid search + rerank only to discard the result), wants_chart (hint the
+    answer prompt), and how it decomposes:
 
-    - "parallel": independent parts, all retrievable right away (existing behavior).
+    - "parallel": independent parts, all retrievable right away.
     - "sequential": a later part can't even be SEARCHED until an earlier part's answer is
       known (e.g. "which department had the most failures, and what policy caused
       them?") — Pipeline._retrieve runs these as a chain of hops, resolving each later
       hop's {hopN} placeholder from the previous hop's own retrieval via resolve_hop()
       before that hop ever runs. Capped at MAX_HOPS.
 
+    A keyword pre-filter can catch "hi"/"hello" but not "give me an overview" (is_broad)
+    or "compare X and Y" (wants_chart) — those are semantic judgments, not lexical
+    patterns, which is why this call is unconditional rather than gated like the old
+    looks_compound() check it replaces.
+
     decompose() always returns a non-empty sub_questions list: [question] unchanged
-    (mode "single") when it isn't compound, on LLM failure, or on turn 1 of a simple
-    question — so callers never need to special-case "not decomposed"."""
+    (mode "single") on LLM failure or when nothing else applies — callers never need to
+    special-case "not decomposed"."""
 
     def __init__(self, llm: LLMClient, max_subquestions: int):
         self.llm = llm
         self.max_subquestions = max_subquestions
 
     def decompose(self, question: str) -> DecomposeResult:
-        if not looks_compound(question):
-            return DecomposeResult("single", [question])
         try:
             reply = self.llm.complete(question, system=DECOMPOSE_SYSTEM_PROMPT).strip()
         except RuntimeError:
             return DecomposeResult("single", [question])
-        if not reply or reply == SINGLE_SENTINEL:
+        if not reply:
             return DecomposeResult("single", [question])
 
         lines = [p for p in (line.strip("-•* \t") for line in reply.splitlines()) if p]
         if not lines:
             return DecomposeResult("single", [question])
+        if lines[0].strip().upper() == META_MARKER:
+            return DecomposeResult("single", [question], is_meta=True)
 
-        marker, rest = lines[0].strip().upper(), lines[1:]
-        if marker == SEQUENTIAL_MARKER:
+        is_broad, wants_chart, mode, rest = parse_route_header(lines)
+        if mode == SEQUENTIAL_MARKER:
             hops = rest[:MAX_HOPS]
-            return DecomposeResult("sequential", hops) if len(hops) > 1 else DecomposeResult("single", [question])
-        # No recognized marker (a plain listing, or an older-style reply) falls back to
-        # the original behavior: the whole reply is an independent parallel split.
-        parts = (rest if marker == PARALLEL_MARKER else lines)[: self.max_subquestions]
-        return DecomposeResult("parallel", parts) if len(parts) > 1 else DecomposeResult("single", [question])
+            if len(hops) > 1:
+                return DecomposeResult("sequential", hops, is_broad=is_broad, wants_chart=wants_chart)
+        elif mode == PARALLEL_MARKER:
+            parts = rest[: self.max_subquestions]
+            if len(parts) > 1:
+                return DecomposeResult("parallel", parts, is_broad=is_broad, wants_chart=wants_chart)
+        return DecomposeResult("single", [question], is_broad=is_broad, wants_chart=wants_chart)
 
     def resolve_hop(self, input_question: str, input_context: str, template: str, placeholder: str) -> str:
         """Turns a later hop's placeholder (e.g. "{hop1}") into a clean, self-contained

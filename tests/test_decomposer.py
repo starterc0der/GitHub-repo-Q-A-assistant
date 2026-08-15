@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.generate.decomposer import HOP_RESOLVE_SYSTEM_PROMPT, SINGLE_SENTINEL, QueryDecomposer, looks_compound
+from src.generate.decomposer import HOP_RESOLVE_SYSTEM_PROMPT, META_MARKER, QueryDecomposer
 
 
 class FakeLLM:
@@ -16,40 +16,64 @@ class FakeLLM:
         return self.response
 
 
-def test_looks_compound_flags_coordinating_language() -> None:
-    assert looks_compound("what does X do and how is that different from Y?")
-    assert looks_compound("who wrote it? when was it published?")
-    assert not looks_compound("what does the Router class do?")
-
-
-def test_decompose_skips_llm_call_for_simple_questions() -> None:
-    llm = FakeLLM(response="unused")
+def test_decompose_always_calls_the_llm_even_for_a_simple_question() -> None:
+    """No keyword pre-filter — is_broad/wants_chart/is_meta are semantic judgments a
+    keyword list can't make, so every question pays for this one cheap call."""
+    llm = FakeLLM(response="NONE\nSINGLE")
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
     result = decomposer.decompose("what does the Router class do?")
 
     assert result.mode == "single"
     assert result.sub_questions == ["what does the Router class do?"]
-    assert llm.calls == 0
+    assert llm.calls == 1
 
 
-def test_decompose_splits_a_compound_question() -> None:
-    """A plain listing reply (no PARALLEL/SEQUENTIAL marker) still falls back to the
-    original independent-parallel behavior."""
-    llm = FakeLLM(response="What does the Router class do?\nHow is that different from HybridSearch?")
+def test_decompose_classifies_meta_questions() -> None:
+    llm = FakeLLM(response=META_MARKER)
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
-    result = decomposer.decompose("what does Router do, and how is that different from HybridSearch?")
+    result = decomposer.decompose("hi, what can you help with?")
 
-    assert result.mode == "parallel"
-    assert result.sub_questions == [
-        "What does the Router class do?",
-        "How is that different from HybridSearch?",
-    ]
+    assert result.is_meta is True
+    assert result.sub_questions == ["hi, what can you help with?"]
+
+
+def test_decompose_classifies_broad_flag() -> None:
+    llm = FakeLLM(response="BROAD\nSINGLE")
+    decomposer = QueryDecomposer(llm, max_subquestions=3)
+
+    result = decomposer.decompose("give me an overview of this repo")
+
+    assert result.is_broad is True
+    assert result.wants_chart is False
+    assert result.mode == "single"
+
+
+def test_decompose_classifies_chart_flag() -> None:
+    llm = FakeLLM(response="CHART\nSINGLE")
+    decomposer = QueryDecomposer(llm, max_subquestions=3)
+
+    result = decomposer.decompose("compare Q1 and Q2 revenue as a chart")
+
+    assert result.wants_chart is True
+    assert result.is_broad is False
+
+
+def test_decompose_classifies_both_broad_and_chart_flags_together() -> None:
+    llm = FakeLLM(response="BROAD CHART\nSINGLE")
+    decomposer = QueryDecomposer(llm, max_subquestions=3)
+
+    result = decomposer.decompose("chart the trend across the whole document")
+
+    assert result.is_broad is True
+    assert result.wants_chart is True
 
 
 def test_decompose_parses_explicit_parallel_marker() -> None:
-    llm = FakeLLM(response="PARALLEL\nWhat does the Router class do?\nHow is that different from HybridSearch?")
+    llm = FakeLLM(
+        response="NONE\nPARALLEL\nWhat does the Router class do?\nHow is that different from HybridSearch?"
+    )
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
     result = decomposer.decompose("what does Router do, and how is that different from HybridSearch?")
@@ -63,7 +87,7 @@ def test_decompose_parses_explicit_parallel_marker() -> None:
 
 def test_decompose_parses_sequential_marker_with_hop_placeholder() -> None:
     llm = FakeLLM(
-        response="SEQUENTIAL\nWhich department had the most failures?\n"
+        response="NONE\nSEQUENTIAL\nWhich department had the most failures?\n"
         "What policy caused failures in {hop1}?"
     )
     decomposer = QueryDecomposer(llm, max_subquestions=3)
@@ -78,7 +102,7 @@ def test_decompose_parses_sequential_marker_with_hop_placeholder() -> None:
 
 
 def test_decompose_sequential_reply_with_only_one_hop_falls_back_to_single() -> None:
-    llm = FakeLLM(response="SEQUENTIAL\nWhich department had the most failures?")
+    llm = FakeLLM(response="NONE\nSEQUENTIAL\nWhich department had the most failures?")
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
     question = "which department had the most failures, and what policy caused them?"
@@ -90,7 +114,7 @@ def test_decompose_sequential_reply_with_only_one_hop_falls_back_to_single() -> 
 
 def test_decompose_parses_sequential_marker_with_three_hops() -> None:
     llm = FakeLLM(
-        response="SEQUENTIAL\nWhich department had the most failures?\n"
+        response="NONE\nSEQUENTIAL\nWhich department had the most failures?\n"
         "What policy caused failures in {hop1}?\nWho approved {hop2}?"
     )
     decomposer = QueryDecomposer(llm, max_subquestions=3)
@@ -108,7 +132,7 @@ def test_decompose_parses_sequential_marker_with_three_hops() -> None:
 
 
 def test_decompose_caps_at_max_subquestions() -> None:
-    llm = FakeLLM(response="\n".join(f"sub-question {i}" for i in range(5)))
+    llm = FakeLLM(response="NONE\nPARALLEL\n" + "\n".join(f"sub-question {i}" for i in range(5)))
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
     result = decomposer.decompose("a and b and c and d and e?")
@@ -116,8 +140,8 @@ def test_decompose_caps_at_max_subquestions() -> None:
     assert len(result.sub_questions) == 3
 
 
-def test_decompose_returns_original_on_single_sentinel() -> None:
-    llm = FakeLLM(response=SINGLE_SENTINEL)
+def test_decompose_returns_original_on_single_mode() -> None:
+    llm = FakeLLM(response="NONE\nSINGLE")
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
     question = "what does the Router class do, and is it fast?"
@@ -132,6 +156,17 @@ def test_decompose_falls_back_to_original_on_llm_failure() -> None:
     decomposer = QueryDecomposer(llm, max_subquestions=3)
 
     question = "what does X do and how is that different from Y?"
+    result = decomposer.decompose(question)
+
+    assert result.mode == "single"
+    assert result.sub_questions == [question]
+
+
+def test_decompose_falls_back_to_original_on_empty_reply() -> None:
+    llm = FakeLLM(response="")
+    decomposer = QueryDecomposer(llm, max_subquestions=3)
+
+    question = "what does the Router class do?"
     result = decomposer.decompose(question)
 
     assert result.mode == "single"

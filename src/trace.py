@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from src.generate.provenance import ClaimCitation
 from src.index.schema import CodeChunk
 from src.ingest.repo_loader import SkippedFile
 
@@ -150,6 +151,11 @@ class AnswerTrace:
     # {"title", "categories": [...], "series": [{"name", "values": [...]}]} — only set on
     # comparison/graph questions where the model emitted a chart block; see ChartParser.
     chart: dict | None = None
+    # Per-claim provenance computed after generation, not self-reported by the answer
+    # model — see ClaimAttributor. Empty when there were no chunks/answer to attribute
+    # (NO_MATCH, gated, or a failed generation). The chat UI never renders these; they
+    # exist only for the pipeline trace view.
+    citations: list[ClaimCitation] = field(default_factory=list)
 
 
 @dataclass
@@ -202,6 +208,11 @@ class QueryTrace:
     # how sub_questions should be captioned/labeled in the UI (independent parts vs.
     # chained hops); every stage after decompose treats sub_questions identically.
     decompose_mode: str = "single"
+    # From the same upfront classification (see DecomposeResult) — is_broad means hybrid
+    # search + rerank were skipped entirely in favor of the wide-source path;
+    # wants_chart means the answer prompt got an explicit chart-formatting hint.
+    is_broad: bool = False
+    wants_chart: bool = False
 
 
 @dataclass

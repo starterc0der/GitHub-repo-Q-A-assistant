@@ -62,9 +62,12 @@ function retrievalStageMeta(data, id) {
         : `${data.final_chunks.length} final chunks${timingSuffix(data, id)}`;
     case "prompt":
       return `${data.final_prompt.length} chars`;
-    case "answer":
+    case "answer": {
       if (!data.answer) return null;
-      return (data.answer.error ? "failed" : "answered") + timingSuffix(data, id);
+      const unsupported = (data.answer.citations || []).filter((c) => c.chunk_ids.length === 0).length;
+      const flag = unsupported > 0 ? ` · ${unsupported} unsupported claim${unsupported > 1 ? "s" : ""}` : "";
+      return (data.answer.error ? "failed" : "answered") + flag + timingSuffix(data, id);
+    }
     default:
       return null;
   }
@@ -111,6 +114,7 @@ export function RetrievalSections({ data, visible }) {
   const subQIndex = new Map((data.sub_questions || []).map((q, i) => [q, i + 1]));
   const isSequential = data.decompose_mode === "sequential";
   const hopLabel = (n) => (isSequential ? `Hop ${n}` : `Q${n}`);
+  const chunkById = new Map((data.final_chunks || []).map((f) => [f.chunk.id, f.chunk]));
 
   return (
     <Fragment>
@@ -125,6 +129,20 @@ export function RetrievalSections({ data, visible }) {
           <div className="rag-callout">
             <span className="rag-callout__label">question</span>
             <p className="rag-mono">&ldquo;{data.question}&rdquo;</p>
+            {(data.is_broad || data.wants_chart) && (
+              <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                {data.is_broad && (
+                  <RagTag tone="accent" title="Classified upfront as needing the wide-source path — hybrid search and rerank were skipped entirely.">
+                    broad — skipped rerank
+                  </RagTag>
+                )}
+                {data.wants_chart && (
+                  <RagTag tone="accent" title="Classified upfront as asking for a comparison/graph — the answer prompt got an explicit chart hint.">
+                    wants chart
+                  </RagTag>
+                )}
+              </div>
+            )}
           </div>
           {subQIndex.size > 0 && (
             <div className="rag-callout">
@@ -139,19 +157,21 @@ export function RetrievalSections({ data, visible }) {
                   const retriedAs = (data.retried_sub_questions || {})[sq];
                   const recovered = retriedAs && !noEvidence;
                   return (
-                    <li key={i}>
-                      <span className="rag-ranked__rank">
-                        {isSequential ? `Hop ${i + 1}` : `Q${i + 1}`}
-                      </span>
-                      <span className="rag-mono rag-ranked__path">{sq}</span>
-                      {noEvidence && (
-                        <RagTag tone="warn">
-                          {retriedAs ? "no evidence found (after retry)" : "no evidence found"}
-                        </RagTag>
-                      )}
-                      {recovered && <RagTag tone="accent2">recovered via retry</RagTag>}
+                    <li key={i} style={{ flexDirection: "column", alignItems: "stretch" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span className="rag-ranked__rank">
+                          {isSequential ? `Hop ${i + 1}` : `Q${i + 1}`}
+                        </span>
+                        <span className="rag-mono rag-ranked__path">{sq}</span>
+                        {noEvidence && (
+                          <RagTag tone="warn">
+                            {retriedAs ? "no evidence found (after retry)" : "no evidence found"}
+                          </RagTag>
+                        )}
+                        {recovered && <RagTag tone="accent2">recovered via retry</RagTag>}
+                      </div>
                       {retriedAs && (
-                        <p className="rag-hint" style={{ margin: "4px 0 0" }}>
+                        <p className="rag-hint" style={{ margin: "4px 0 0 30px" }}>
                           Retried as: &ldquo;{retriedAs}&rdquo;
                         </p>
                       )}
@@ -405,6 +425,53 @@ export function RetrievalSections({ data, visible }) {
               <span className="rag-callout__label">answer</span>
               <AnswerText text={data.answer.text} />
               <span className="rag-answer__model">{data.answer.model}</span>
+            </div>
+          )}
+          {data.answer.citations?.length > 0 && (
+            <div className="rag-callout" style={{ marginTop: 12 }}>
+              <span className="rag-callout__label">
+                claim-level citations & verification — computed after generation, not
+                self-reported by the model; never shown in chat itself
+              </span>
+              <p className="rag-hint" style={{ margin: "4px 0 8px" }}>
+                {data.answer.citations.filter((c) => c.chunk_ids.length > 0).length} of{" "}
+                {data.answer.citations.length} claims verified against a source chunk
+                {data.answer.citations.some((c) => c.chunk_ids.length === 0) &&
+                  " — unsupported claims flagged below"}
+              </p>
+              {data.answer.citations.map((c, i) => {
+                const evidenceChunk = c.evidence_chunk_id && chunkById.get(c.evidence_chunk_id);
+                return (
+                  <div className="rag-citation" key={i}>
+                    <div className="rag-citation__head">
+                      <span className="rag-mono">{c.claim}</span>
+                      {c.chunk_ids.length > 0 ? (
+                        c.chunk_ids.map((id) => {
+                          const chunk = chunkById.get(id);
+                          return (
+                            chunk && (
+                              <RagTag key={id} tone={id === c.evidence_chunk_id ? "accent2" : "dim"}>
+                                {chunk.file_path}:L{chunk.start_line}-L{chunk.end_line}
+                              </RagTag>
+                            )
+                          );
+                        })
+                      ) : (
+                        <RagTag tone="warn">unsupported</RagTag>
+                      )}
+                    </div>
+                    {evidenceChunk ? (
+                      <RagChunkCard chunk={evidenceChunk} highlightLine={c.evidence_line} />
+                    ) : (
+                      c.evidence && (
+                        <p className="rag-hint" style={{ margin: "4px 0 0" }}>
+                          Evidence: &ldquo;{c.evidence}&rdquo;
+                        </p>
+                      )
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </RagSection>

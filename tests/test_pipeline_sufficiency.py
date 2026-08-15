@@ -54,8 +54,8 @@ def _stub_finish(pipeline: Pipeline) -> None:
 def test_single_question_is_always_sufficient() -> None:
     """No decomposition happened, so there's no "some parts missing" to report — the
     existing NO_MATCH/wide_fallback gate already fully covers this question's outcome."""
-    pipeline = _pipeline_stub("SINGLE")  # keyword pre-filter won't even call this
-    pipeline._retrieve_candidates = lambda q, space_id: _CandidateState(
+    pipeline = _pipeline_stub("NONE\nSINGLE")
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: _CandidateState(
         query_vector=[0.0], routed=[], scored_candidates=[], reranked_scored=[],
     )
     _stub_finish(pipeline)
@@ -67,12 +67,12 @@ def test_single_question_is_always_sufficient() -> None:
 
 
 def test_decomposed_question_with_both_sub_questions_covered_is_sufficient() -> None:
-    pipeline = _pipeline_stub("What does X do?\nWhat does Y do?")
+    pipeline = _pipeline_stub("NONE\nPARALLEL\nWhat does X do?\nWhat does Y do?")
     states_by_q = {
         "What does X do?": _CandidateState([0.0], [], [], [(_chunk("x1"), 0.9)]),
         "What does Y do?": _CandidateState([0.0], [], [], [(_chunk("y1"), 0.8)]),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("what does X do and what does Y do?", "demo")
@@ -84,12 +84,12 @@ def test_decomposed_question_with_both_sub_questions_covered_is_sufficient() -> 
 def test_decomposed_question_with_one_sub_question_uncovered_is_partial() -> None:
     """The exact real-world case this feature exists for: "who is Drona, and how is he
     different from Kripa?" — Drona has evidence, the comparison doesn't."""
-    pipeline = _pipeline_stub("Who is Drona?\nHow is Drona different from Kripa?")
+    pipeline = _pipeline_stub("NONE\nPARALLEL\nWho is Drona?\nHow is Drona different from Kripa?")
     states_by_q = {
         "Who is Drona?": _CandidateState([0.0], [], [], [(_chunk("d1"), 0.9)]),
         "How is Drona different from Kripa?": _CandidateState([0.0], [], [], []),  # rerank gate: nothing cleared it
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("who is Drona, and how is he different from Kripa?", "demo")
@@ -99,12 +99,12 @@ def test_decomposed_question_with_one_sub_question_uncovered_is_partial() -> Non
 
 
 def test_decomposed_question_with_no_sub_questions_covered_is_insufficient() -> None:
-    pipeline = _pipeline_stub("What is X?\nWhat is Y?")
+    pipeline = _pipeline_stub("NONE\nPARALLEL\nWhat is X?\nWhat is Y?")
     states_by_q = {
         "What is X?": _CandidateState([0.0], [], [], []),
         "What is Y?": _CandidateState([0.0], [], [], []),
     }
-    pipeline._retrieve_candidates = lambda q, space_id: states_by_q[q]
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("what is X and what is Y?", "demo")

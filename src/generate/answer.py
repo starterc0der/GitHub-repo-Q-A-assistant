@@ -100,20 +100,20 @@ class AnswerGenerator:
 
     def answer(
         self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None,
-        insufficient: list[str] | None = None,
+        insufficient: list[str] | None = None, wants_chart: bool = False,
     ) -> Answer:
-        prompt = self.build_prompt(question, chunks, insufficient)
+        prompt = self.build_prompt(question, chunks, insufficient, wants_chart)
         text = self.llm.complete(prompt, system=SYSTEM_PROMPT, history=history)
         return self.finalize(text)
 
     def answer_stream(
         self, question: str, chunks: list[CodeChunk], history: list[tuple[str, str]] | None = None,
-        insufficient: list[str] | None = None,
+        insufficient: list[str] | None = None, wants_chart: bool = False,
     ) -> Iterator[str]:
         """Yields raw text deltas as they arrive. Chart extraction needs the complete
         text (it's a fenced block, not parseable mid-stream), so callers should
         accumulate the deltas and call finalize() once the stream ends."""
-        prompt = self.build_prompt(question, chunks, insufficient)
+        prompt = self.build_prompt(question, chunks, insufficient, wants_chart)
         yield from self.llm.stream(prompt, system=SYSTEM_PROMPT, history=history)
 
     def finalize(self, text: str) -> Answer:
@@ -121,7 +121,8 @@ class AnswerGenerator:
         return Answer(text=text, chart=chart)
 
     def build_prompt(
-        self, question: str, chunks: list[CodeChunk], insufficient: list[str] | None = None
+        self, question: str, chunks: list[CodeChunk], insufficient: list[str] | None = None,
+        wants_chart: bool = False,
     ) -> str:
         context = "\n\n".join(
             f"[{chunk.file_path}:L{chunk.start_line}-L{chunk.end_line}]\n{chunk.code}"
@@ -137,5 +138,16 @@ class AnswerGenerator:
             note = (
                 f"\n\nNote: no supporting evidence was found for: {parts}. State that gap "
                 "plainly, in your own words — never as \"the chunks/excerpts don't mention...\"."
+            )
+        # The upfront router (see DecomposeResult.wants_chart) already classified this as
+        # a comparison/graph request — reinforces SYSTEM_PROMPT's standing chart rule for
+        # this specific call rather than relying on the model to notice unprompted. Still
+        # conditional on the source material actually having comparable numeric values —
+        # this note doesn't override that check.
+        if wants_chart:
+            note += (
+                "\n\nNote: this question was classified as asking for a comparison or "
+                "graph — check whether the source material above contains comparable "
+                "numeric values, and if so, use the ```chart block as instructed."
             )
         return f"Source material:\n{context}\n\nQuestion: {question}{note}\n\nAnswer:"

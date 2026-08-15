@@ -70,26 +70,83 @@ def _empty_gate_counts() -> dict[str, int]:
     return {k: 0 for k in GATE_KEYS}
 
 
-def _gate_outcomes_by_day(messages: list[dict], days: int = 14) -> list[dict]:
-    """Real day-by-day history from actual message timestamps — not fabricated. A day
-    with no questions reports null percentages (no data), not 0%, since those mean
-    different things: "nothing asked" vs. "asked, and none were gated"."""
-    from datetime import UTC, datetime, timedelta
+MAX_RANGE_DAYS = 730  # defensive cap on a caller-supplied range — query params are a trust boundary
+DEFAULT_RANGE_DAYS = 14
 
-    by_day: dict[str, dict[str, int]] = {}
-    for m in messages:
-        day = m["created_at"][:10]
-        bucket = by_day.setdefault(day, _empty_gate_counts())
-        bucket[_gate_outcome(m)] += 1
+
+def _resolve_range(all_messages: list[dict], start: str | None, end: str | None) -> tuple[str, str, str, str]:
+    """Returns (range_start, range_end, range_min_date, range_max_date), all ISO date
+    strings. min/max bound the date picker (earliest message ever asked, through today);
+    start/end are the resolved selection — the last DEFAULT_RANGE_DAYS days when the
+    caller didn't ask for a specific range, clamped to a sane span otherwise so a
+    caller-supplied range can't force an unbounded day-walk below."""
+    from datetime import UTC, date, datetime, timedelta
 
     today = datetime.now(UTC).date()
+    message_dates = [m["created_at"][:10] for m in all_messages]
+    range_min_date = min(message_dates) if message_dates else today.isoformat()
+
+    if start is None and end is None:
+        end_d = today
+        start_d = today - timedelta(days=DEFAULT_RANGE_DAYS - 1)
+    else:
+        try:
+            start_d = date.fromisoformat(start) if start else today - timedelta(days=DEFAULT_RANGE_DAYS - 1)
+            end_d = date.fromisoformat(end) if end else today
+        except ValueError:
+            start_d, end_d = today - timedelta(days=DEFAULT_RANGE_DAYS - 1), today
+        if start_d > end_d:
+            start_d, end_d = end_d, start_d
+        end_d = min(end_d, today)
+        if (end_d - start_d).days > MAX_RANGE_DAYS:
+            start_d = end_d - timedelta(days=MAX_RANGE_DAYS)
+
+    return start_d.isoformat(), end_d.isoformat(), range_min_date, today.isoformat()
+
+
+def _daily_buckets(messages: list[dict], range_start: str, range_end: str) -> list[dict]:
+    """One entry per calendar day in [range_start, range_end], real message data only —
+    the shared walk that the gate/cache/token day-series below all derive from, so
+    widening the date range only means widening this one loop instead of three."""
+    from datetime import date, timedelta
+
+    by_day: dict[str, dict] = {}
+    for m in messages:
+        day = m["created_at"][:10]
+        bucket = by_day.setdefault(day, {
+            "gate": _empty_gate_counts(), "total": 0, "cache_hits": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+        })
+        bucket["gate"][_gate_outcome(m)] += 1
+        bucket["total"] += 1
+        if m["cache_hit"]:
+            bucket["cache_hits"] += 1
+        tokens = m["trace_obj"].get("tokens") or {}
+        bucket["prompt_tokens"] += tokens.get("prompt_tokens", 0)
+        bucket["completion_tokens"] += tokens.get("completion_tokens", 0)
+
+    start_d, end_d = date.fromisoformat(range_start), date.fromisoformat(range_end)
     out = []
-    for i in range(days - 1, -1, -1):
-        day = (today - timedelta(days=i)).isoformat()
-        counts = by_day.get(day, _empty_gate_counts())
-        total = sum(counts.values())
+    d = start_d
+    while d <= end_d:
+        day = d.isoformat()
+        b = by_day.get(day, {
+            "gate": _empty_gate_counts(), "total": 0, "cache_hits": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+        })
+        out.append({"date": day, **b})
+        d += timedelta(days=1)
+    return out
+
+
+def _gate_outcomes_by_day(daily: list[dict]) -> list[dict]:
+    """A day with no questions reports null percentages (no data), not 0%, since those
+    mean different things: "nothing asked" vs. "asked, and none were gated"."""
+    out = []
+    for b in daily:
+        counts, total = b["gate"], b["total"]
         out.append({
-            "date": day,
+            "date": b["date"],
             "total": total,
             "answered_pct": (counts["answered"] / total) if total else None,
             "no_match_pct": (counts["no-match"] / total) if total else None,
@@ -99,10 +156,31 @@ def _gate_outcomes_by_day(messages: list[dict], days: int = 14) -> list[dict]:
     return out
 
 
+def _cache_hit_by_day(daily: list[dict]) -> list[dict]:
+    """Null hit_rate (not 0%) on a day with no questions — same "no data" vs. "asked and
+    none hit" distinction as the gate day-series."""
+    return [
+        {"date": b["date"], "total": b["total"], "hit_rate": (b["cache_hits"] / b["total"]) if b["total"] else None}
+        for b in daily
+    ]
+
+
+def _tokens_by_day(daily: list[dict]) -> list[dict]:
+    return [
+        {"date": b["date"], "prompt_tokens": b["prompt_tokens"], "completion_tokens": b["completion_tokens"]}
+        for b in daily
+    ]
+
+
 @router.get("/spaces/{space_id}/insights")
-def space_insights(space_id: str) -> dict[str, object]:
+def space_insights(space_id: str, start: str | None = None, end: str | None = None) -> dict[str, object]:
     _space_row(space_id)
-    messages = _space_assistant_messages(space_id)
+    all_messages = _space_assistant_messages(space_id)
+    range_start, range_end, range_min_date, range_max_date = _resolve_range(all_messages, start, end)
+    # Every space-level stat below is scoped to the selected range — not just the day-series
+    # charts — so the range picker at the top of the page genuinely governs what "this
+    # space's retrieval pipeline, aggregated" means, rather than only repainting some charts.
+    messages = [m for m in all_messages if range_start <= m["created_at"][:10] <= range_end]
 
     total = len(messages)
     cache_hits = sum(1 for m in messages if m["cache_hit"])
@@ -158,6 +236,8 @@ def space_insights(space_id: str) -> dict[str, object]:
         })
     chat_rows.sort(key=lambda r: r["question_count"], reverse=True)
 
+    daily = _daily_buckets(messages, range_start, range_end)
+
     return {
         "space_id": space_id,
         "question_count": total,
@@ -166,9 +246,16 @@ def space_insights(space_id: str) -> dict[str, object]:
         "avg_latency_ms": avg_latency_ms,
         "tokens": total_tokens,
         "gate_outcomes": gate_counts,
-        "gate_outcomes_by_day": _gate_outcomes_by_day(messages),
+        "gate_outcomes_by_day": _gate_outcomes_by_day(daily),
+        "cache_hit_by_day": _cache_hit_by_day(daily),
+        "tokens_by_day": _tokens_by_day(daily),
         "stage_latency": stage_latency,
         "chats": chat_rows,
+        "range_start": range_start,
+        "range_end": range_end,
+        "range_min_date": range_min_date,
+        "range_max_date": range_max_date,
+        "range_day_count": len(daily),
     }
 
 

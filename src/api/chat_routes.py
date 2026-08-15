@@ -325,12 +325,13 @@ async def _send_message_events(
 
 async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIterator[bytes]:
     history = _load_history(chat_id, settings.history_turns)
-    is_meta, standalone = await run_in_threadpool(pipeline.rewrite_standalone, raw_question, history)
+    route, route_ms, route_tokens = await run_in_threadpool(pipeline.route_question, raw_question, history)
 
-    # A question about the conversation itself ("what have we talked about") rather than
-    # the document — the rewrite call above already classified this as a side effect (see
-    # StandaloneRewriter), so skip retrieval and answer straight from history.
-    if is_meta:
+    # A question about the conversation/assistant itself ("what have we talked about",
+    # "hi", "what can you do") rather than the document — the route call above already
+    # classified this as a side effect (see Pipeline.route_question), so skip retrieval
+    # and answer straight from history.
+    if route.is_meta:
         # Loaded before the insert below, so the question being asked right now isn't
         # duplicated into its own history.
         full_history = _load_full_history(chat_id)
@@ -338,20 +339,31 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
         content = await run_in_threadpool(pipeline.answer_meta, raw_question, full_history)
         yield _sse({"type": "delta", "text": content})
         # No retrieval stages ran, so this isn't a QueryTrace — just the actual
-        # transcript the model saw, so "why did it say that" is still answerable.
+        # transcript the model saw plus what it answered, so "why did it say that" is
+        # still answerable (content also lives in the message row, but the trace should
+        # be self-contained like every other trace shape, not require a second lookup).
+        # "answer_text", not "answer" — a real QueryTrace's "answer" is a nested
+        # {text, model, ...} object (see AnswerTrace); insights_routes.py's
+        # `trace.get("answer") or {}` runs on every trace regardless of shape, and a
+        # plain string there would crash the very next `.get()` call on it.
         meta_trace = json.dumps({
             "meta": True,
             "question": raw_question,
             "history": [{"role": role, "content": text} for role, text in full_history],
+            "answer_text": content,
         })
         assistant_id = _insert_message(chat_id, "assistant", content, trace=meta_trace)
         _touch_chat(chat_id)
         yield _sse({"type": "done", "message": _get_message(assistant_id)})
         return
 
+    # For parallel/sequential mode there's no single "resolved compound question" string
+    # — the route call already split it into sub_questions directly — so the trace's
+    # primary question field just falls back to the user's raw words, same as turn 1.
+    standalone = route.sub_questions[0] if route.mode == "single" else raw_question
     _insert_message(
         chat_id, "user", raw_question,
-        standalone_question=standalone if history else None,
+        standalone_question=standalone if history and route.mode == "single" else None,
     )
 
     cache_ms: float | None = None
@@ -379,7 +391,10 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
             yield _sse({"type": "done", "message": _get_message(assistant_id)})
             return
 
-    gen = pipeline.query_trace_stream(standalone, space_id, raw_question=raw_question, history=history)
+    gen = pipeline.query_trace_stream(
+        standalone, space_id, raw_question=raw_question, history=history,
+        decompose_result=route, decompose_ms=route_ms, decompose_tokens=route_tokens,
+    )
     trace = None
     while True:
         result = await run_in_threadpool(_advance, gen)
