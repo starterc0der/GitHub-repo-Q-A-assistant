@@ -116,6 +116,10 @@ class _RetrievalState:
     # got one retry attempt (whether or not the retry found anything). Empty unless at
     # least one sub-question was insufficient after the first pass. See Pipeline._retrieve.
     retried_sub_questions: dict[str, str] = field(default_factory=dict)
+    # "single" | "parallel" | "sequential" — see QueryDecomposer.decompose. Only changes
+    # how sub_questions/timings.caption should be worded in the UI; every stage after
+    # decompose treats sub_questions identically regardless of mode.
+    decompose_mode: str = "single"
 
 
 class Pipeline:
@@ -560,6 +564,23 @@ class Pipeline:
         )
         return _CandidateState(query_vector, routed, scored_candidates, reranked_scored, timings)
 
+    HOP_CONTEXT_TOP_K = 3
+    HOP_CONTEXT_CHUNK_CHARS = 150
+
+    def _hop_context(self, state: _CandidateState) -> str:
+        """A zero-extra-LLM-call stand-in for a hop's answer, fed to resolve_hop as the
+        raw material it extracts a clean answer from — the top-K reranked chunks (not
+        just the top-1) since the specific answer often lands a few slots down even when
+        the top chunk is a good match for the question overall. Empty if the hop itself
+        found nothing (see Pipeline._retrieve's sequential branch)."""
+        if not state.reranked_scored:
+            return ""
+        parts = [
+            " ".join(chunk.code.split())[: self.HOP_CONTEXT_CHUNK_CHARS]
+            for chunk, _score in state.reranked_scored[: self.HOP_CONTEXT_TOP_K]
+        ]
+        return " ".join(parts)
+
     def _merge_candidates(
         self, sub_questions: list[str], states: list[_CandidateState]
     ) -> tuple[_CandidateState, dict[str, str], dict[str, str], dict[str, str]]:
@@ -770,14 +791,45 @@ class Pipeline:
             # earlier, unrelated call left behind.
             self.bulk_llm.last_usage = None
             decompose_started = time.monotonic()
-            sub_questions = self.decomposer.decompose(question)
+            decompose_result = self.decomposer.decompose(question)
             decompose_ms = (time.monotonic() - decompose_started) * 1000
             decompose_tokens: dict[str, int] = {}
             _add_usage(decompose_tokens, self.bulk_llm.last_usage)
-            if len(sub_questions) == 1:
+            mode = decompose_result.mode
+
+            if mode == "single":
+                sub_questions = decompose_result.sub_questions
                 states = [self._retrieve_candidates(sub_questions[0], space_id)]
                 decomposed: list[str] = []
+            elif mode == "sequential":
+                # Each hop's query doesn't exist until the previous hop's own retrieval
+                # answers it — this chain cannot run in parallel like the independent case
+                # below. Resolving a later hop's {hopN} placeholder costs one cheap
+                # bulk-LLM call (QueryDecomposer.resolve_hop) over the previous hop's own
+                # top-reranked chunk, skipped entirely when that hop found nothing. See
+                # _hop_context.
+                templates = decompose_result.sub_questions
+                logger.info("  [0/6 decompose] sequential: hops=%r", templates)
+                sub_questions = [templates[0]]
+                states = [self._retrieve_candidates(templates[0], space_id)]
+                for i, template in enumerate(templates[1:], start=2):
+                    context = self._hop_context(states[-1])
+                    placeholder = f"{{hop{i - 1}}}"
+                    # Folded into the decompose stage's own timing/token bucket below
+                    # (decompose_ms/decompose_tokens) rather than a separate stage — a
+                    # resolve call is conceptually still "figuring out what to search
+                    # for," same as the initial decompose call.
+                    self.bulk_llm.last_usage = None
+                    resolve_started = time.monotonic()
+                    hop_q = self.decomposer.resolve_hop(sub_questions[-1], context, template, placeholder)
+                    decompose_ms += (time.monotonic() - resolve_started) * 1000
+                    _add_usage(decompose_tokens, self.bulk_llm.last_usage)
+                    logger.info("  [hop %d/%d] resolved as %r", i, len(templates), hop_q)
+                    sub_questions.append(hop_q)
+                    states.append(self._retrieve_candidates(hop_q, space_id))
+                decomposed = sub_questions
             else:
+                sub_questions = decompose_result.sub_questions
                 logger.info(
                     "  [0/6 decompose] split into %d sub-questions: %r",
                     len(sub_questions), sub_questions,
@@ -856,6 +908,7 @@ class Pipeline:
             state.sufficiency = sufficiency
             state.insufficient_sub_questions = insufficient_sub_qs
             state.retried_sub_questions = retried_sub_questions
+            state.decompose_mode = mode
         except Cancelled:
             logger.warning(
                 "RETRIEVAL CANCELLED after %.1fs | question=%r", time.monotonic() - started, question
@@ -908,6 +961,7 @@ class Pipeline:
             sufficiency=state.sufficiency,
             insufficient_sub_questions=state.insufficient_sub_questions,
             retried_sub_questions=state.retried_sub_questions,
+            decompose_mode=state.decompose_mode,
         )
 
     def query_trace(

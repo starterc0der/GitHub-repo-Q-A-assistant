@@ -105,10 +105,12 @@ export function RetrievalStageList({ data, statuses, current, onSelect }) {
 }
 
 export function RetrievalSections({ data, visible }) {
-  // Maps each sub-question to a short "Q1"/"Q2" label — only non-empty when the question
-  // was actually decomposed, so route/hybrid/rerank rows can show which part produced
-  // them without repeating the full sub-question text on every row.
+  // Maps each sub-question to a short "Q1"/"Q2" (or "Hop 1"/"Hop 2") label — only
+  // non-empty when the question was actually decomposed, so route/hybrid/rerank rows
+  // can show which part produced them without repeating the full text on every row.
   const subQIndex = new Map((data.sub_questions || []).map((q, i) => [q, i + 1]));
+  const isSequential = data.decompose_mode === "sequential";
+  const hopLabel = (n) => (isSequential ? `Hop ${n}` : `Q${n}`);
 
   return (
     <Fragment>
@@ -127,8 +129,9 @@ export function RetrievalSections({ data, visible }) {
           {subQIndex.size > 0 && (
             <div className="rag-callout">
               <span className="rag-callout__label">
-                split into {subQIndex.size} independent sub-questions — each retrieved in
-                parallel, merged before compression
+                {isSequential
+                  ? `split into ${subQIndex.size} chained hops — each hop's query is built from the previous hop's own retrieval result before it runs`
+                  : `split into ${subQIndex.size} independent sub-questions — each retrieved in parallel, merged before compression`}
               </span>
               <ul className="rag-ranked">
                 {data.sub_questions.map((sq, i) => {
@@ -137,7 +140,9 @@ export function RetrievalSections({ data, visible }) {
                   const recovered = retriedAs && !noEvidence;
                   return (
                     <li key={i}>
-                      <span className="rag-ranked__rank">Q{i + 1}</span>
+                      <span className="rag-ranked__rank">
+                        {isSequential ? `Hop ${i + 1}` : `Q${i + 1}`}
+                      </span>
                       <span className="rag-mono rag-ranked__path">{sq}</span>
                       {noEvidence && (
                         <RagTag tone="warn">
@@ -192,7 +197,7 @@ export function RetrievalSections({ data, visible }) {
                 <span className="rag-mono rag-ranked__path">{f.file_path}</span>
                 {subQIndex.has(f.source_question) && (
                   <RagTag tone="dim" title={f.source_question}>
-                    Q{subQIndex.get(f.source_question)}
+                    {hopLabel(subQIndex.get(f.source_question))}
                   </RagTag>
                 )}
                 <RagScorePill label="score" value={f.score} tone="accent2" />
@@ -227,7 +232,7 @@ export function RetrievalSections({ data, visible }) {
               badge={
                 subQIndex.has(c.source_question) && (
                   <RagTag tone="dim" title={c.source_question}>
-                    Q{subQIndex.get(c.source_question)}
+                    {hopLabel(subQIndex.get(c.source_question))}
                   </RagTag>
                 )
               }
@@ -277,7 +282,7 @@ export function RetrievalSections({ data, visible }) {
                 badge={
                   subQIndex.has(r.source_question) && (
                     <RagTag tone="dim" title={r.source_question}>
-                      Q{subQIndex.get(r.source_question)}
+                      {hopLabel(subQIndex.get(r.source_question))}
                     </RagTag>
                   )
                 }

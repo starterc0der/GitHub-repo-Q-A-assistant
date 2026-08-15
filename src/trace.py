@@ -198,6 +198,10 @@ class QueryTrace:
     # got one retry attempt before sufficiency/insufficient_sub_questions above were
     # finalized. Empty unless at least one sub-question needed a retry. See Pipeline._retrieve.
     retried_sub_questions: dict[str, str] = field(default_factory=dict)
+    # "single" | "parallel" | "sequential" — see QueryDecomposer.decompose. Only changes
+    # how sub_questions should be captioned/labeled in the UI (independent parts vs.
+    # chained hops); every stage after decompose treats sub_questions identically.
+    decompose_mode: str = "single"
 
 
 @dataclass
