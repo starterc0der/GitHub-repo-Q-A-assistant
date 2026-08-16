@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     hybrid_bm25_weight: float = 0.25
     # Cross-encoder reranking: final number of chunks handed to compression/generation.
     rerank_top_k: int = 6
+    # MMR relevance/diversity balance for that final selection (see CrossReranker) — 1.0
+    # is plain top-k by score, 0.0 is pure diversity. 0.7 favors relevance but still lets
+    # a near-duplicate chunk lose to a genuinely different, slightly lower-scoring one.
+    mmr_lambda: float = 0.7
     # Compound questions ("what does X do, and how is Y different?") are split into at
     # most this many independent sub-questions, each retrieved in parallel, before the
     # shared compress/generate steps. 1 disables decomposition entirely.
@@ -56,6 +60,14 @@ class Settings(BaseSettings):
     # If the best reranked chunk scores below this, nothing in the repo answers the
     # question. Measured: off-topic tops out at 0.0, weakest real match was 0.35.
     rerank_min_top_score: float = 0.01
+    # A sub-question's top score clearing rerank_min_top_score only proves relevance
+    # (on-topic), not answerability (the specific fact is actually in there) — a chunk can
+    # pass the floor and still not answer the question. Below this ceiling, worth a cheap
+    # SufficiencyChecker call to actually read the evidence; at or above it, the score
+    # alone is trusted (no measured calibration data yet, unlike rerank_min_top_score
+    # above — this is a starting point, re-check with real near-miss cases via `make eval`
+    # once there's a golden-set case for it).
+    sufficiency_check_max_score: float = 0.4
     # Disambiguates zero reranked chunks: broad question (go wide) vs. off-topic (say
     # NO_MATCH). Below this route score, treat it as off-topic. Measured across 3 spaces,
     # 12 questions (evals/golden_set.py): off-topic tops out at 0.4876, on-topic (broad

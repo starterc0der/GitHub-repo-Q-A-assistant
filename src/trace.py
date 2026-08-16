@@ -130,6 +130,9 @@ class RerankedChunkTrace:
     chunk: CodeChunk
     rerank_score: float
     source_question: str | None = None
+    # True when MMR picked this chunk over a higher-scoring alternative for diversity —
+    # see CrossReranker.rerank_scored_with_diversity. Always False when MMR wasn't used.
+    diversity_pick: bool = False
 
 
 @dataclass
@@ -138,6 +141,11 @@ class CompressedChunkTrace:
     original_line_count: int
     compressed_line_count: int
     dropped: bool
+    # Estimated via Tokenizer.CHARS_PER_TOKEN, same convention as the wide-fallback token
+    # budget — free, local, no new LLM call. compressed_tokens == original_tokens for a
+    # wide-fallback chunk (nothing was compressed) and 0 for a dropped chunk.
+    original_tokens: int = 0
+    compressed_tokens: int = 0
 
 
 @dataclass

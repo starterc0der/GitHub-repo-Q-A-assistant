@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import math
+import threading
 import time
 from collections.abc import Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ from src.generate.faithfulness import FaithfulnessChecker, FaithfulnessResult
 from src.generate.intent import BroadIntentClassifier, matches_broad_keywords
 from src.generate.memory import ConversationMemory
 from src.generate.provenance import ClaimAttributor
+from src.generate.sufficiency import SufficiencyChecker
 from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
 from src.index.doc_index import DocIndex
@@ -83,6 +85,10 @@ class _CandidateState:
     routed: list[tuple[str, str, float]]
     scored_candidates: list[ScoredChunk]
     reranked_scored: list[tuple[CodeChunk, float]]
+    # Chunk IDs in reranked_scored that MMR picked over a higher-scoring alternative for
+    # diversity — see CrossReranker.rerank_scored_with_diversity. Empty when MMR wasn't
+    # used or happened to agree with plain top-k anyway.
+    diversity_picks: set[str] = field(default_factory=set)
     # ms per stage: embed, route, hybrid, rerank.
     timings: dict[str, float] = field(default_factory=dict)
 
@@ -101,6 +107,7 @@ class _RetrievalState:
     wide_fallback: bool
     wide_fallback_reason: str
     too_large_message: str | None
+    diversity_picks: set[str] = field(default_factory=set)
     # Empty unless the question was decomposed; source_question maps below are then keyed
     # by file_path (routed) or chunk.id (candidate/reranked) -> which sub-question won it.
     sub_questions: list[str] = field(default_factory=list)
@@ -166,6 +173,7 @@ class Pipeline:
         self.faithfulness_checker = FaithfulnessChecker(bulk_llm)
         self.claim_attributor = ClaimAttributor(bulk_llm)
         self.conversation_memory = ConversationMemory(bulk_llm)
+        self.sufficiency_checker = SufficiencyChecker(bulk_llm)
 
         self.embedder = Embedder(settings.embedding_model)
         store = VectorStore(settings.qdrant_url)
@@ -179,7 +187,9 @@ class Pipeline:
             self.chunk_index,
             RankFuser(settings.hybrid_dense_weight, settings.hybrid_bm25_weight),
         )
-        self.cross_reranker = CrossReranker(settings.reranker_model, settings.rerank_min_top_score)
+        self.cross_reranker = CrossReranker(
+            settings.reranker_model, settings.rerank_min_top_score, settings.mmr_lambda
+        )
         self.compressor = Compressor(llm)
         self.answer_generator = AnswerGenerator(llm, max_context_tokens=settings.answer_context_max_tokens)
 
@@ -606,24 +616,27 @@ class Pipeline:
         done("2/6 route", "route", f"{len(routed)} files shortlisted")
 
         if skip_hybrid_rerank:
-            return _CandidateState(query_vector, routed, [], [], timings)
+            return _CandidateState(query_vector, routed, [], [], timings=timings)
 
         scored_candidates = self.hybrid_search.search_scored(
             question, space_id, file_paths, self.settings.hybrid_candidate_k,
             query_vector=query_vector,
         )
         candidate_chunks = [sc.chunk for sc in scored_candidates]
+        candidate_vectors = [sc.vector for sc in scored_candidates]
         done("3/6 hybrid", "hybrid", f"{len(candidate_chunks)} candidates")
 
-        reranked_scored = self.cross_reranker.rerank_scored(
-            question, candidate_chunks, self.settings.rerank_top_k
+        reranked_scored, diversity_picks = self.cross_reranker.rerank_scored_with_diversity(
+            question, candidate_chunks, self.settings.rerank_top_k, vectors=candidate_vectors
         )
         done(
             "4/6 rerank", "rerank",
             f"{len(reranked_scored)} kept of {len(candidate_chunks)}"
             + ("" if reranked_scored else " — top score below gate"),
         )
-        return _CandidateState(query_vector, routed, scored_candidates, reranked_scored, timings)
+        return _CandidateState(
+            query_vector, routed, scored_candidates, reranked_scored, diversity_picks, timings
+        )
 
     HOP_CONTEXT_TOP_K = 3
     HOP_CONTEXT_CHUNK_CHARS = 150
@@ -686,6 +699,7 @@ class Pipeline:
                     reranked_best[chunk.id] = (chunk, score)
                     reranked_origin[chunk.id] = sub_q
         reranked_scored = sorted(reranked_best.values(), key=lambda cs: cs[1], reverse=True)
+        diversity_picks: set[str] = set().union(*(s.diversity_picks for s in states))
 
         # Branches ran concurrently, so each stage's real contribution to wall-clock time
         # is however long the SLOWEST branch took at that stage, not the sum of all of them.
@@ -694,7 +708,9 @@ class Pipeline:
             for key in ("embed", "route", "hybrid", "rerank")
         }
 
-        merged = _CandidateState(query_vector, routed, scored_candidates, reranked_scored, timings)
+        merged = _CandidateState(
+            query_vector, routed, scored_candidates, reranked_scored, diversity_picks, timings
+        )
         return merged, routed_origin, candidate_origin, reranked_origin
 
     def _finish_retrieval(
@@ -766,6 +782,10 @@ class Pipeline:
                             len(compressed.code.splitlines()) if compressed else 0
                         ),
                         dropped=compressed is None,
+                        original_tokens=len(chunk.code) // Tokenizer.CHARS_PER_TOKEN,
+                        compressed_tokens=(
+                            len(compressed.code) // Tokenizer.CHARS_PER_TOKEN if compressed else 0
+                        ),
                     )
                 )
                 if compressed is not None:
@@ -793,6 +813,8 @@ class Pipeline:
                         original_line_count=len(chunk.code.splitlines()),
                         compressed_line_count=len(chunk.code.splitlines()),
                         dropped=False,
+                        original_tokens=len(chunk.code) // Tokenizer.CHARS_PER_TOKEN,
+                        compressed_tokens=len(chunk.code) // Tokenizer.CHARS_PER_TOKEN,
                     )
                     for chunk in wide_chunks
                 ]
@@ -823,6 +845,7 @@ class Pipeline:
             wide_fallback=wide_fallback,
             wide_fallback_reason=wide_reason,
             too_large_message=too_large_message,
+            diversity_picks=candidate.diversity_picks,
             sub_questions=sub_questions,
             routed_origin=routed_origin,
             candidate_origin=candidate_origin,
@@ -927,38 +950,98 @@ class Pipeline:
             # Each sub-question's OWN rerank already gates on min_top_score (see
             # CrossReranker.rerank_scored) — an empty reranked_scored means THAT
             # sub-question specifically found nothing, before the merge below pools
-            # everything together and that per-sub-question signal is lost. Only
-            # meaningful when decomposed: one question has no "some parts" to be
-            # partial about — its coverage is already fully captured by the existing
-            # NO_MATCH/wide_fallback gate.
-            insufficient_sub_qs = (
-                [q for q, s in zip(sub_questions, states) if not s.reranked_scored]
-                if len(sub_questions) > 1 else []
-            )
+            # everything together and that per-sub-question signal is lost. But a
+            # non-empty result only proves relevance (it scored above the floor), not
+            # answerability — a chunk can be squarely on-topic and still not contain the
+            # specific fact asked for. Only worth the extra SufficiencyChecker call in the
+            # ambiguous middle band (below sufficiency_check_max_score): a score
+            # comfortably above it is empirically almost always a real, complete match
+            # (weakest genuine match measured was 0.35 — see rerank_min_top_score's own
+            # docstring), so spending a call to confirm near-certainty is wasted cost.
+            # Applies regardless of mode now — a single, non-decomposed question gets the
+            # same scrutiny a sub-question does, not just decomposed ones.
+            insufficient_sub_qs: list[str] = []
+            sufficiency_check_ms = 0.0
+            sufficiency_check_tokens: dict[str, int] = {}
+            # mode == "single" with is_broad is the one case reranked_scored is empty ON
+            # PURPOSE (see skip_hybrid_rerank above) — the router already decided this
+            # needs the wide-fallback path, not chunk-level search. Treating that empty
+            # result as "insufficient, retry narrowly" would silently run a full search
+            # the router deliberately skipped, and bypass wide-fallback entirely before
+            # _finish_retrieval ever gets to make that call. Only skip the check for
+            # THIS specific reason — a genuine zero-chunk result on any other path still
+            # needs to be caught below.
+            skip_sufficiency_check = mode == "single" and decompose_result.is_broad
+            if not skip_sufficiency_check:
+                for q, s in zip(sub_questions, states):
+                    if not s.reranked_scored:
+                        insufficient_sub_qs.append(q)
+                        continue
+                    if s.reranked_scored[0][1] >= self.settings.sufficiency_check_max_score:
+                        continue
+                    self.bulk_llm.last_usage = None
+                    check_started = time.monotonic()
+                    missing = self.sufficiency_checker.check(
+                        q, [c for c, _ in s.reranked_scored[: self.settings.rerank_top_k]]
+                    )
+                    sufficiency_check_ms += (time.monotonic() - check_started) * 1000
+                    _add_usage(sufficiency_check_tokens, self.bulk_llm.last_usage)
+                    if missing is not None:
+                        insufficient_sub_qs.append(q)
             # One retry per insufficient sub-question, capped at a single extra pass (no
             # loop): rewrite it — the original phrasing may just not match how the source
-            # text describes it — and search again. Only meaningful when decomposed, same
-            # scope as the sufficiency signal itself.
+            # text describes it, or may be missing the specific evidence type identified
+            # above — and search again.
             retried_sub_questions: dict[str, str] = {}
             retry_ms = 0.0
             retry_tokens: dict[str, int] = {}
-            if insufficient_sub_qs and len(sub_questions) > 1:
+            if insufficient_sub_qs:
+                # Snapshot before retry mutates states — a sub-question stays insufficient
+                # unless retry actually replaces its state below. Re-deriving this from
+                # `not s.reranked_scored` afterward would be wrong now that a sub-question
+                # can be insufficient while still holding its ORIGINAL non-empty (just not
+                # answering) chunks — a failed/no-op retry would then silently clear it.
+                pre_retry_insufficient = set(insufficient_sub_qs)
+                resolved: set[str] = set()
                 retry_started = time.monotonic()
-                for idx, sub_q in enumerate(sub_questions):
-                    if sub_q not in insufficient_sub_qs:
-                        continue
+
+                def _retry_one(
+                    idx: int, sub_q: str
+                ) -> tuple[int, str, str, dict | None, _CandidateState | None]:
+                    # last_usage is thread-local (see LLMClient) specifically so concurrent
+                    # calls here don't race on a shared attribute — each thread reads back
+                    # only its own call's usage.
                     self.bulk_llm.last_usage = None
                     rewritten = self.decomposer.rewrite_for_retry(sub_q, question)
-                    _add_usage(retry_tokens, self.bulk_llm.last_usage)
+                    usage = self.bulk_llm.last_usage
                     if rewritten == sub_q:
-                        continue
-                    retried_sub_questions[sub_q] = rewritten
+                        return idx, sub_q, rewritten, usage, None
                     logger.info("  [retry] %r found nothing, retrying as %r", sub_q, rewritten)
                     new_state = self._retrieve_candidates(rewritten, space_id)
-                    if new_state.reranked_scored:
-                        states[idx] = new_state
+                    return idx, sub_q, rewritten, usage, new_state
+
+                # Independent per sub-question, same as the main parallel-retrieval pass
+                # above — same ThreadPoolExecutor + copy_context() pattern, same reason
+                # (cancellation propagation). Token totals are merged on this thread only,
+                # after collecting every result, so retry_tokens (a plain shared dict)
+                # never gets mutated from more than one thread at a time.
+                targets = [(idx, sub_q) for idx, sub_q in enumerate(sub_questions) if sub_q in insufficient_sub_qs]
+                with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+                    futures = [
+                        pool.submit(contextvars.copy_context().run, _retry_one, idx, sub_q)
+                        for idx, sub_q in targets
+                    ]
+                    for f in futures:
+                        idx, sub_q, rewritten, usage, new_state = f.result()
+                        _add_usage(retry_tokens, usage)
+                        if new_state is None:
+                            continue
+                        retried_sub_questions[sub_q] = rewritten
+                        if new_state.reranked_scored:
+                            states[idx] = new_state
+                            resolved.add(sub_q)
                 retry_ms = (time.monotonic() - retry_started) * 1000
-                insufficient_sub_qs = [q for q, s in zip(sub_questions, states) if not s.reranked_scored]
+                insufficient_sub_qs = [q for q in pre_retry_insufficient if q not in resolved]
 
             if not insufficient_sub_qs:
                 sufficiency = "sufficient"
@@ -976,6 +1059,9 @@ class Pipeline:
             )
             state.timings["decompose"] = decompose_ms
             _add_usage(state.tokens, decompose_tokens)
+            if sufficiency_check_ms:
+                state.timings["sufficiency_check"] = sufficiency_check_ms
+                _add_usage(state.tokens, sufficiency_check_tokens)
             if retried_sub_questions:
                 state.timings["retry"] = retry_ms
                 _add_usage(state.tokens, retry_tokens)
@@ -1019,6 +1105,7 @@ class Pipeline:
                 RerankedChunkTrace(
                     chunk=chunk, rerank_score=score,
                     source_question=state.reranked_origin.get(chunk.id),
+                    diversity_pick=chunk.id in state.diversity_picks,
                 )
                 for chunk, score in state.reranked_scored
             ],

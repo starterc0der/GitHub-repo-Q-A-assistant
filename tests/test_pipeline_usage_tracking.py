@@ -49,8 +49,11 @@ def _pipeline_stub(bulk_llm: _FakeLLM) -> Pipeline:
 def test_pre_routed_decompose_result_does_not_pick_up_stale_bulk_llm_usage() -> None:
     """Regression guard: when the caller already classified this turn (see
     Pipeline.route_question) and passes decompose_result straight through, _retrieve()
-    must not call decompose() again or read self.bulk_llm.last_usage at all — that would
-    misattribute some EARLIER, unrelated call's cost to this question's decompose stage."""
+    must not call decompose() again or read self.bulk_llm.last_usage for the decompose
+    stage — that would misattribute some EARLIER, unrelated call's cost to it. The single
+    call that DOES happen here is the (now single-question-eligible) retry attempt for
+    the empty reranked_scored below — a no-op rewrite (this fake returns "" for it), so
+    it correctly contributes zero tokens rather than the stale 999/999 leaking in."""
     bulk_llm = _FakeLLM()
     bulk_llm.last_usage = {"prompt_tokens": 999, "completion_tokens": 999}  # stale leftover
     pipeline = _pipeline_stub(bulk_llm)
@@ -65,7 +68,7 @@ def test_pre_routed_decompose_result_does_not_pick_up_stale_bulk_llm_usage() -> 
 
     state = pipeline._retrieve("what does the Router class do?", "demo", decompose_result=route)
 
-    assert bulk_llm.calls == 0  # pre-routed — _retrieve never calls decompose() itself
+    assert bulk_llm.calls == 1  # the retry attempt, not decompose — decompose was pre-routed
     assert state.tokens == {}
     assert "decompose" in state.timings
 

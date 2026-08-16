@@ -300,11 +300,21 @@ export function RetrievalSections({ data, visible }) {
                 chunk={r.chunk}
                 scores={[["rerank", r.rerank_score, "accent"]]}
                 badge={
-                  subQIndex.has(r.source_question) && (
-                    <RagTag tone="dim" title={r.source_question}>
-                      {hopLabel(subQIndex.get(r.source_question))}
-                    </RagTag>
-                  )
+                  <>
+                    {subQIndex.has(r.source_question) && (
+                      <RagTag tone="dim" title={r.source_question}>
+                        {hopLabel(subQIndex.get(r.source_question))}
+                      </RagTag>
+                    )}
+                    {r.diversity_pick && (
+                      <RagTag
+                        tone="accent2"
+                        title="MMR picked this chunk over a higher-scoring alternative because it covers different ground — not just relevance order."
+                      >
+                        picked for diversity
+                      </RagTag>
+                    )}
+                  </>
                 }
               />
             ))
@@ -337,6 +347,19 @@ export function RetrievalSections({ data, visible }) {
               </p>
             </RagEmptyStage>
           )}
+          {data.final_chunks.length > 0 && (() => {
+            const totalOriginal = data.final_chunks.reduce((sum, f) => sum + (f.original_tokens || 0), 0);
+            const totalCompressed = data.final_chunks.reduce((sum, f) => sum + (f.compressed_tokens || 0), 0);
+            if (!totalOriginal) return null;
+            const pct = Math.round((1 - totalCompressed / totalOriginal) * 100);
+            return (
+              <p className="rag-hint">
+                {totalOriginal.toLocaleString()} → {totalCompressed.toLocaleString()} tokens across{" "}
+                {data.final_chunks.length} chunk{data.final_chunks.length === 1 ? "" : "s"}
+                {pct > 0 ? ` · ${pct}% reduction` : ""}
+              </p>
+            );
+          })()}
           {data.final_chunks.map((f, i) => (
             <RagChunkCard
               key={f.chunk.id + i}
@@ -347,6 +370,7 @@ export function RetrievalSections({ data, visible }) {
                 ) : (
                   <RagTag tone="accent2">
                     {f.original_line_count} → {f.compressed_line_count} lines
+                    {f.original_tokens > 0 && ` · ${f.original_tokens} → ${f.compressed_tokens} tokens`}
                   </RagTag>
                 )
               }

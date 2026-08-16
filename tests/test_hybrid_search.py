@@ -93,3 +93,8 @@ def test_search_scored_exposes_dense_bm25_and_fused_scores() -> None:
     assert [sc.chunk.file_path for sc in results] == ["a.py", "b.py"]
     assert results[0].dense_score > results[1].dense_score
     assert results[0].fused_score >= results[1].fused_score
+    # The chunk's own stored vector rides along — not recomputed, just not discarded
+    # anymore — so a later MMR diversity pass can compare candidates without a second
+    # embedding call.
+    assert results[0].vector == [1.0, 0.0]
+    assert results[1].vector == [0.0, 1.0]

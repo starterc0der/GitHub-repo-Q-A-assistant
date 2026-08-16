@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from unittest.mock import Mock, patch
 
 import requests
@@ -98,6 +99,37 @@ def test_complete_leaves_last_usage_none_when_provider_omits_it(mock_post: Mock)
     client.complete("hello")
 
     assert client.last_usage is None
+
+
+def test_last_usage_is_isolated_per_thread() -> None:
+    """Pipeline's retry pass (src/pipeline.py) runs complete() calls concurrently across
+    worker threads sharing one LLMClient instance — last_usage must be thread-local, or
+    one thread's read can pick up another thread's write to a plain shared attribute.
+    Forces the exact interleaving that would corrupt a shared attribute: A writes, B
+    writes (would clobber a shared slot), THEN A reads — A must still see its own value."""
+    client = LLMClient("https://api.example.com", "key", "test-model")
+    a_wrote = threading.Event()
+    b_wrote = threading.Event()
+    results: dict[str, dict | None] = {}
+
+    def thread_a() -> None:
+        client.last_usage = {"prompt_tokens": 1}
+        a_wrote.set()
+        b_wrote.wait(timeout=5)
+        results["a"] = client.last_usage
+
+    def thread_b() -> None:
+        a_wrote.wait(timeout=5)
+        client.last_usage = {"prompt_tokens": 2}
+        b_wrote.set()
+
+    t1, t2 = threading.Thread(target=thread_a), threading.Thread(target=thread_b)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    assert results["a"] == {"prompt_tokens": 1}
 
 
 @patch("requests.post")

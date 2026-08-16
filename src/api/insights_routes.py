@@ -19,8 +19,8 @@ router = APIRouter()
 # than hidden as free. compress/generate always call it, when reached at all.
 STAGE_IS_API = {
     "cache": False, "decompose": True, "embed": False, "route": False,
-    "hybrid": False, "rerank": False, "gate": True, "retry": True, "compress": True,
-    "generate": True,
+    "hybrid": False, "rerank": False, "sufficiency_check": True, "gate": True,
+    "retry": True, "compress": True, "generate": True,
 }
 STAGE_ORDER = list(STAGE_IS_API)
 
@@ -61,6 +61,19 @@ def _gate_outcome(msg: dict) -> str:
 
 def _total_latency_ms(trace: dict) -> float:
     return sum((trace.get("timings") or {}).values())
+
+
+def _faithful_or_none(msg: dict) -> bool | None:
+    """None when this message never had claims to check — a meta answer, a NO_MATCH
+    refusal, or anything else that never reached ClaimAttributor (no "answer.citations"
+    at all, or an empty list). Otherwise: True iff every citation found a supporting
+    chunk (chunk_ids non-empty) — one unsupported claim makes the whole answer not
+    fully faithful."""
+    answer = msg["trace_obj"].get("answer") or {}
+    citations = answer.get("citations") or []
+    if not citations:
+        return None
+    return all(c.get("chunk_ids") for c in citations)
 
 
 GATE_KEYS = ("answered", "no-match", "wide-fallback", "partial")
@@ -110,13 +123,17 @@ def _daily_buckets(messages: list[dict], range_start: str, range_end: str) -> li
     widening the date range only means widening this one loop instead of three."""
     from datetime import date, timedelta
 
+    def _empty_bucket() -> dict:
+        return {
+            "gate": _empty_gate_counts(), "total": 0, "cache_hits": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "citations_total": 0, "citations_faithful": 0,
+        }
+
     by_day: dict[str, dict] = {}
     for m in messages:
         day = m["created_at"][:10]
-        bucket = by_day.setdefault(day, {
-            "gate": _empty_gate_counts(), "total": 0, "cache_hits": 0,
-            "prompt_tokens": 0, "completion_tokens": 0,
-        })
+        bucket = by_day.setdefault(day, _empty_bucket())
         bucket["gate"][_gate_outcome(m)] += 1
         bucket["total"] += 1
         if m["cache_hit"]:
@@ -124,16 +141,18 @@ def _daily_buckets(messages: list[dict], range_start: str, range_end: str) -> li
         tokens = m["trace_obj"].get("tokens") or {}
         bucket["prompt_tokens"] += tokens.get("prompt_tokens", 0)
         bucket["completion_tokens"] += tokens.get("completion_tokens", 0)
+        faithful = _faithful_or_none(m)
+        if faithful is not None:
+            bucket["citations_total"] += 1
+            if faithful:
+                bucket["citations_faithful"] += 1
 
     start_d, end_d = date.fromisoformat(range_start), date.fromisoformat(range_end)
     out = []
     d = start_d
     while d <= end_d:
         day = d.isoformat()
-        b = by_day.get(day, {
-            "gate": _empty_gate_counts(), "total": 0, "cache_hits": 0,
-            "prompt_tokens": 0, "completion_tokens": 0,
-        })
+        b = by_day.get(day, _empty_bucket())
         out.append({"date": day, **b})
         d += timedelta(days=1)
     return out
@@ -161,6 +180,19 @@ def _cache_hit_by_day(daily: list[dict]) -> list[dict]:
     none hit" distinction as the gate day-series."""
     return [
         {"date": b["date"], "total": b["total"], "hit_rate": (b["cache_hits"] / b["total"]) if b["total"] else None}
+        for b in daily
+    ]
+
+
+def _faithfulness_by_day(daily: list[dict]) -> list[dict]:
+    """Null faithful_rate (not 0%) on a day with no answers that had claims to check
+    (nothing but meta/no-match/wide-fallback that day) — same "no data" vs. "checked, some
+    unsupported" distinction as the cache/gate day-series."""
+    return [
+        {
+            "date": b["date"], "total": b["citations_total"],
+            "faithful_rate": (b["citations_faithful"] / b["citations_total"]) if b["citations_total"] else None,
+        }
         for b in daily
     ]
 
@@ -248,6 +280,7 @@ def space_insights(space_id: str, start: str | None = None, end: str | None = No
         "gate_outcomes": gate_counts,
         "gate_outcomes_by_day": _gate_outcomes_by_day(daily),
         "cache_hit_by_day": _cache_hit_by_day(daily),
+        "faithfulness_by_day": _faithfulness_by_day(daily),
         "tokens_by_day": _tokens_by_day(daily),
         "stage_latency": stage_latency,
         "chats": chat_rows,

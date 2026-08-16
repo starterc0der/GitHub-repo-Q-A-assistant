@@ -12,12 +12,17 @@ from src.index.schema import CodeChunk
 
 @dataclass
 class ScoredChunk:
-    """A candidate chunk with its per-signal scores, for inspecting the fusion step."""
+    """A candidate chunk with its per-signal scores, for inspecting the fusion step.
+
+    vector: the chunk's own dense embedding, already fetched from Qdrant for dense
+    scoring above — carried through (not recomputed) so a later MMR diversity pass can
+    compare candidates to each other without a second embedding call."""
 
     chunk: CodeChunk
     dense_score: float
     bm25_score: float
     fused_score: float
+    vector: list[float]
 
 
 class RankFuser:
@@ -72,11 +77,11 @@ class HybridSearch:
 
         fused = self.fuser.fuse(dense_scores, bm25_scores)
         ranked = sorted(
-            zip(fused, dense_scores, bm25_scores, chunks), key=lambda t: t[0], reverse=True
+            zip(fused, dense_scores, bm25_scores, chunks, vectors), key=lambda t: t[0], reverse=True
         )
         return [
-            ScoredChunk(chunk=chunk, dense_score=dense, bm25_score=bm25_, fused_score=fused_)
-            for fused_, dense, bm25_, chunk in ranked[:k]
+            ScoredChunk(chunk=chunk, dense_score=dense, bm25_score=bm25_, fused_score=fused_, vector=vector)
+            for fused_, dense, bm25_, chunk, vector in ranked[:k]
         ]
 
     def _cosine_scores(

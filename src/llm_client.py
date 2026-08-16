@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 from collections.abc import Iterator
 
 import requests
@@ -34,7 +35,19 @@ class LLMClient:
         self.max_retries = max_retries
         # Side-channel so callers (rewriter, decomposer, ...) don't need their return
         # signatures changed — Pipeline reads this right after each call instead.
-        self.last_usage: dict[str, int] | None = None
+        # threading.local so concurrent callers (see Pipeline's retry pass, which runs
+        # complete() calls in parallel across worker threads sharing one LLMClient) each
+        # see only their OWN call's usage, not whichever thread's call happened to finish
+        # last and overwrote a plain shared attribute out from under another thread.
+        self._usage_local = threading.local()
+
+    @property
+    def last_usage(self) -> dict[str, int] | None:
+        return getattr(self._usage_local, "value", None)
+
+    @last_usage.setter
+    def last_usage(self, value: dict[str, int] | None) -> None:
+        self._usage_local.value = value
 
     def complete(
         self, prompt: str, system: str | None = None, history: list[tuple[str, str]] | None = None

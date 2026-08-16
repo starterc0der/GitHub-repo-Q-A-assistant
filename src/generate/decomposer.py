@@ -90,11 +90,16 @@ HOP_RESOLVE_SYSTEM_PROMPT = (
 
 RETRY_REWRITE_SYSTEM_PROMPT = (
     "A sub-question from a larger question found no supporting evidence in the source "
-    "material. Rewrite it as a differently-phrased, self-contained question aimed at the "
-    "same underlying information need — the original phrasing may just not match how the "
-    "source text describes it (e.g. a comparison sub-question often finds more by asking "
-    "directly about the other side of the comparison instead of the comparison itself). "
-    "Reply with only the rewritten question, nothing else."
+    "material. Before rewriting, identify what SPECIFIC TYPE of evidence would actually "
+    "answer it — a root cause, an incident report, a name, a date, a policy or rule, a "
+    "specific numeric value, etc. — not just a differently-worded restatement of the same "
+    "question. The original phrasing may be too abstract or indirect for how the source "
+    "text actually describes this (e.g. a comparison sub-question often finds more by "
+    "asking directly about the other side of the comparison than about the comparison "
+    "itself; \"why did X fail\" often finds more by searching for the specific root cause, "
+    "incident report, or failure record than by re-asking \"why\").\n"
+    "Reply with only the rewritten, self-contained question targeting that evidence type — "
+    "no reasoning, no explanation, no preamble."
 )
 
 

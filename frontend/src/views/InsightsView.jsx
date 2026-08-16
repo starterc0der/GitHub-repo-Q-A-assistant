@@ -285,6 +285,36 @@ function CacheHitHistogram({ cacheHitByDay, rangeDayCount, rangeStartLabel, rang
   );
 }
 
+// Same layout/CSS as CacheHitHistogram, same "no data" vs "checked, some unsupported"
+// distinction — a day with no answers that had claims to check (all meta/no-match/wide-
+// fallback) gets the faint placeholder bar, not a misleading 0%.
+function FaithfulnessHistogram({ faithfulnessByDay, rangeDayCount, rangeStartLabel, rangeEndLabel }) {
+  return (
+    <div className="rag-insight-panel" style={{ display: "flex", flexDirection: "column" }}>
+      <div className="rag-insight-panel__title">Faithfulness rate by day ({rangeDayCount}d)</div>
+      <div className="rag-cache-hist">
+        {faithfulnessByDay.map((d) => {
+          const hasData = d.faithful_rate != null;
+          const label = hasData
+            ? `${fmtDateShort(d.date)}: ${fmtPct(d.faithful_rate)} fully faithful (${Math.round(d.faithful_rate * d.total)} of ${d.total})`
+            : `${fmtDateShort(d.date)}: no answers with claims to check`;
+          return (
+            <div className="rag-cache-hist__col" key={d.date} title={label}>
+              <div
+                className={cls("rag-cache-hist__bar", !hasData && "rag-cache-hist__bar--empty")}
+                style={{ height: `${Math.round((d.faithful_rate || 0) * 100)}%` }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="rag-cache-hist__axis">
+        <span>{rangeStartLabel}</span><span>{rangeEndLabel}</span>
+      </div>
+    </div>
+  );
+}
+
 function DateRangePicker({ range, minDate, maxDate, dayCount, onChange }) {
   if (!range) return null;
   return (
@@ -422,6 +452,12 @@ export function SpaceInsightsView({ ctl }) {
         />
         <CacheHitHistogram
           cacheHitByDay={spaceData.cache_hit_by_day} rangeDayCount={spaceData.range_day_count}
+          rangeStartLabel={rangeStartLabel} rangeEndLabel={rangeEndLabel}
+        />
+      </div>
+      <div className="rag-insight-row">
+        <FaithfulnessHistogram
+          faithfulnessByDay={spaceData.faithfulness_by_day} rangeDayCount={spaceData.range_day_count}
           rangeStartLabel={rangeStartLabel} rangeEndLabel={rangeEndLabel}
         />
       </div>

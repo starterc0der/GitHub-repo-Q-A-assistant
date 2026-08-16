@@ -124,15 +124,24 @@ def test_retry_rewrite_returning_the_same_text_is_not_retried_again() -> None:
     assert "retry" not in state.timings
 
 
-def test_single_question_never_retries() -> None:
-    """No decomposition, no sub-question-level insufficiency to retry — matches the
-    existing sufficiency-detection scope."""
-    llm = _FakeLLM("SINGLE")
+def test_single_question_retries_once_when_nothing_found() -> None:
+    """A single, non-decomposed question gets the same one-shot retry a sub-question
+    does — not just decomposed questions, matching the current design."""
+    llm = _FakeLLM("SINGLE", retry_replies=["What is the Router class responsible for?"])
     pipeline = _pipeline_stub(llm)
-    pipeline._retrieve_candidates = lambda q, space_id, **_kw: _CandidateState([0.0], [], [], [])
+    states_by_q = {
+        "what does the Router class do?": _CandidateState([0.0], [], [], []),
+        "What is the Router class responsible for?": _CandidateState(
+            [0.0], [], [], [(_chunk("r1"), 0.9)]
+        ),
+    }
+    pipeline._retrieve_candidates = lambda q, space_id, **_kw: states_by_q[q]
     _stub_finish(pipeline)
 
     state = pipeline._retrieve("what does the Router class do?", "demo")
 
-    assert state.retried_sub_questions == {}
-    assert llm.retry_calls == 0
+    assert state.retried_sub_questions == {
+        "what does the Router class do?": "What is the Router class responsible for?"
+    }
+    assert llm.retry_calls == 1
+    assert state.sufficiency == "sufficient"

@@ -6,17 +6,26 @@ from src.api.insights_routes import (
     MAX_RANGE_DAYS,
     _cache_hit_by_day,
     _daily_buckets,
+    _faithful_or_none,
+    _faithfulness_by_day,
     _gate_outcomes_by_day,
     _resolve_range,
     _tokens_by_day,
 )
 
 
-def _msg(created_at: str, cache_hit: bool = False, prompt_tokens: int = 0, completion_tokens: int = 0) -> dict:
+def _msg(
+    created_at: str, cache_hit: bool = False, prompt_tokens: int = 0, completion_tokens: int = 0,
+    citations: list[list[str]] | None = None,
+) -> dict:
+    """citations: one list of chunk_ids per claim, e.g. [["c1"], []] = 2 claims, 2nd unsupported."""
     return {
         "created_at": f"{created_at}T12:00:00+00:00",
         "cache_hit": cache_hit,
-        "trace_obj": {"tokens": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}},
+        "trace_obj": {
+            "tokens": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            "answer": {"citations": [{"chunk_ids": ids} for ids in citations]} if citations is not None else {},
+        },
     }
 
 
@@ -112,6 +121,54 @@ def test_cache_hit_by_day_reports_null_on_a_day_with_no_questions() -> None:
 
     assert result[0]["hit_rate"] == 1.0
     assert result[1]["hit_rate"] is None
+
+
+def test_faithful_or_none_is_none_when_message_has_no_citations() -> None:
+    assert _faithful_or_none(_msg("2026-01-01")) is None
+    assert _faithful_or_none(_msg("2026-01-01", citations=[])) is None
+
+
+def test_faithful_or_none_true_when_every_claim_has_a_supporting_chunk() -> None:
+    msg = _msg("2026-01-01", citations=[["c1"], ["c2", "c3"]])
+
+    assert _faithful_or_none(msg) is True
+
+
+def test_faithful_or_none_false_when_any_claim_is_unsupported() -> None:
+    msg = _msg("2026-01-01", citations=[["c1"], []])
+
+    assert _faithful_or_none(msg) is False
+
+
+def test_faithfulness_by_day_reports_null_on_a_day_with_nothing_to_check() -> None:
+    # 2 messages that day: one fully faithful, one with an unsupported claim -> 1 of 2.
+    daily = _daily_buckets(
+        [
+            _msg("2026-01-01", citations=[["c1"]]),
+            _msg("2026-01-01", citations=[["c1"], []]),
+        ],
+        "2026-01-01", "2026-01-02",
+    )
+
+    result = _faithfulness_by_day(daily)
+
+    assert result[0]["total"] == 2
+    assert result[0]["faithful_rate"] == 0.5
+    assert result[1]["total"] == 0
+    assert result[1]["faithful_rate"] is None
+
+
+def test_faithfulness_by_day_excludes_meta_and_no_match_messages_from_denominator() -> None:
+    # A meta/no-match message has no citations at all — must not count as a 0%-faithful
+    # answer, and must not count toward the day's total either.
+    daily = _daily_buckets(
+        [_msg("2026-01-01", citations=[["c1"]]), _msg("2026-01-01")], "2026-01-01", "2026-01-01"
+    )
+
+    result = _faithfulness_by_day(daily)
+
+    assert result[0]["total"] == 1
+    assert result[0]["faithful_rate"] == 1.0
 
 
 def test_tokens_by_day_sums_prompt_and_completion_tokens() -> None:
