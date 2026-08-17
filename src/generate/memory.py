@@ -2,31 +2,42 @@ from __future__ import annotations
 
 from src.llm_client import LLMClient
 
+NONE_SENTINEL = "NONE"
+
 SYSTEM_PROMPT = (
-    "You maintain a compact running summary of an earlier part of a conversation, so a "
-    "model that only sees the summary plus the most recent turns still has continuity "
-    "with what came before. Given the EXISTING SUMMARY (empty on the first fold) and the "
-    "NEW TURNS to fold in, write an updated summary covering both — a few sentences of "
-    "plain prose, no preamble. Preserve concrete facts, names, and decisions; drop small "
-    "talk and phrasing detail."
+    "You extract one atomic fact from a single question-and-answer turn in a "
+    "conversation, so it can be remembered later without re-reading the whole exchange. "
+    "Write one short, self-contained sentence stating what was established — concrete "
+    "facts, names, and decisions, not the question itself or how it was phrased.\n"
+    "Answer only from what THIS TURN'S ANSWER actually states — never use outside "
+    "knowledge to fill in what it doesn't say, even if you recognize the topic. If the "
+    f"answer is a refusal, says the source material doesn't cover it, or establishes "
+    f"nothing concrete, reply with exactly: {NONE_SENTINEL}"
 )
 
 
 class ConversationMemory:
-    """Keeps a chat's un-windowed history from either disappearing (a fixed-N recency
-    window forgets everything older) or being replayed in full forever (sending the whole
-    chat on every meta/recap question). fold() runs once per turn, only for the turn(s)
-    that just aged out of the window — never re-summarizes turns already folded in."""
+    """Extracts one atomic fact per aged-out turn and keeps it permanently, instead of
+    repeatedly re-summarizing the whole running memory into fresh prose. A fact rewritten
+    on every fold erodes over many turns — an early fact can get rewritten dozens of
+    times by turn 50, and testing showed this genuinely happening: two of the earliest
+    facts in a 15-turn conversation were completely gone by the end, question order was
+    lost entirely, and the model started blending in outside knowledge the conversation
+    never actually stated. An atomic fact extracted once and never touched again can't
+    erode or drift — see src/api/chat_routes.py's _windowed_history for how facts
+    accumulate turn by turn."""
 
     def __init__(self, llm: LLMClient):
         self.llm = llm
 
-    def fold(self, existing_summary: str, new_turns: list[tuple[str, str]]) -> str:
-        if not new_turns:
-            return existing_summary
-        transcript = "\n".join(f"{role}: {content}" for role, content in new_turns)
-        prompt = f"EXISTING SUMMARY: {existing_summary or '(none yet)'}\n\nNEW TURNS:\n{transcript}"
+    def extract(self, question: str, answer: str) -> str | None:
+        """Returns a short fact string, or None when this turn established nothing
+        concrete (a refusal, NO_MATCH, or an LLM call failure — never guessed)."""
+        prompt = f"Question: {question}\nAnswer: {answer}"
         try:
-            return self.llm.complete(prompt, system=SYSTEM_PROMPT).strip() or existing_summary
+            reply = self.llm.complete(prompt, system=SYSTEM_PROMPT).strip()
         except RuntimeError:
-            return existing_summary  # keep the old summary rather than losing it on a flaky call
+            return None
+        if not reply or reply == NONE_SENTINEL:
+            return None
+        return reply

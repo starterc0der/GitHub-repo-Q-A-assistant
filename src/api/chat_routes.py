@@ -51,31 +51,52 @@ def _set_title_if_new(chat_id: str, title: str) -> None:
 
 
 def _windowed_history(
-    rows: list[tuple[str, str]], turns: int, already_folded: int, existing_summary: str,
-    fold_fn,
-) -> tuple[list[tuple[str, str]], str, int]:
+    rows: list[tuple[str, str]], turns: int, already_folded: int, existing_facts: list[dict],
+    extract_fn,
+) -> tuple[list[tuple[str, str]], list[dict], int]:
     """rows: every (role, content) message in the chat, oldest first, two per completed
     turn. Turns 1..turns pay nothing extra — the raw window still holds everything. Past
-    that, each new turn ages exactly one older turn out of the window; fold_fn folds it
-    into the running summary (only the turns not already folded — never re-summarizes),
-    and the returned history is [("system", summary)] + the last `turns` raw turns, never
-    the unbounded full transcript. Pure function — the caller owns DB reads/writes and
-    threading the (possibly blocking) fold_fn off the event loop."""
+    that, each new turn ages exactly one older turn out of the window; extract_fn pulls
+    one atomic fact from it (or None, for a refusal/no-answer turn) and the fact is
+    appended PERMANENTLY as {"turn": N, "fact": ...} — never rewritten by a later call.
+    That's the load-bearing difference from the old whole-summary refold: re-summarizing
+    the same running text on every fold caused early facts to erode over many turns
+    (verified live — two of the earliest facts in a 15-turn test were gone by the end,
+    and outside knowledge started leaking in). An atomic fact written once and left
+    untouched can't drift.
+
+    Returns the history to send — the facts as one "Turn N: fact" system message,
+    followed by the last `turns` raw turns, never the unbounded full transcript — plus
+    the updated fact list and folded-turn count. Pure function — the caller owns DB
+    reads/writes and threading the (possibly blocking) extract_fn off the event loop."""
     total_turns = len(rows) // 2
     if total_turns <= turns:
-        return list(rows), existing_summary, already_folded
+        return list(rows), existing_facts, already_folded
     fold_through = total_turns - turns
-    if fold_through > already_folded:
-        new_turn_rows = rows[already_folded * 2 : fold_through * 2]
-        existing_summary = fold_fn(existing_summary, new_turn_rows)
-        already_folded = fold_through
+    facts = list(existing_facts)
+    for turn_idx in range(already_folded, fold_through):
+        question, answer = rows[turn_idx * 2][1], rows[turn_idx * 2 + 1][1]
+        fact = extract_fn(question, answer)
+        if fact is not None:
+            facts.append({"turn": turn_idx + 1, "fact": fact})
     window = rows[fold_through * 2 :]
-    history = ([("system", existing_summary)] if existing_summary else []) + window
-    return history, existing_summary, already_folded
+    # The turn numbers alone don't tell a reader they're chronological — without this
+    # framing line, "what was the first thing asked" gets answered from whichever fact
+    # seems most salient rather than the lowest turn number (seen live: a turn-13 fact
+    # picked over the real turn-1 one). Stated once here so every consumer of this system
+    # message (meta answers, the rewrite/router call, generation) sees the same claim,
+    # instead of repeating an ordering instruction in each of their own prompts.
+    facts_text = "\n".join(f"Turn {f['turn']}: {f['fact']}" for f in facts)
+    summary_text = (
+        f"Earlier facts from this conversation, in chronological order (Turn 1 is the "
+        f"earliest, higher numbers are more recent):\n{facts_text}"
+    )
+    history = ([("system", summary_text)] if facts else []) + window
+    return history, facts, fold_through
 
 
 def _load_history(chat_id: str, turns: int) -> list[tuple[str, str]]:
-    """Recent raw turns plus a rolling summary of everything older — see
+    """Recent raw turns plus the accumulated fact list for everything older — see
     _windowed_history. Used for both retrieval-rewrite/generation continuity AND meta/recap
     answers alike: one mechanism, never the fixed-N-only window and never the whole
     unbounded chat."""
@@ -87,15 +108,19 @@ def _load_history(chat_id: str, turns: int) -> list[tuple[str, str]]:
             "SELECT memory_summary, memory_folded_turns FROM chats WHERE id=?", (chat_id,)
         ).fetchone()
     all_turns = [(r["role"], r["content"]) for r in rows]
-    history, summary, folded = _windowed_history(
-        all_turns, turns, chat["memory_folded_turns"], chat["memory_summary"],
-        pipeline.conversation_memory.fold,
+    try:
+        existing_facts = json.loads(chat["memory_summary"]) if chat["memory_summary"] else []
+    except (json.JSONDecodeError, TypeError):
+        existing_facts = []  # pre-existing plain-prose summary from before this format — start fresh
+    history, facts, folded = _windowed_history(
+        all_turns, turns, chat["memory_folded_turns"], existing_facts,
+        pipeline.conversation_memory.extract,
     )
     if folded != chat["memory_folded_turns"]:
         with connect(settings.db_path) as conn:
             conn.execute(
                 "UPDATE chats SET memory_summary=?, memory_folded_turns=? WHERE id=?",
-                (summary, folded, chat_id),
+                (json.dumps(facts), folded, chat_id),
             )
     return history
 
