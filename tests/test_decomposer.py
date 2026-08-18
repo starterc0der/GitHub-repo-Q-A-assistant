@@ -70,6 +70,17 @@ def test_decompose_classifies_both_broad_and_chart_flags_together() -> None:
     assert result.wants_chart is True
 
 
+def test_decompose_classifies_live_flag() -> None:
+    llm = FakeLLM(response="LIVE\nSINGLE")
+    decomposer = QueryDecomposer(llm, max_subquestions=3)
+
+    result = decomposer.decompose("what is the pressure at Zone_11 right now")
+
+    assert result.wants_live_data is True
+    assert result.is_broad is False
+    assert result.wants_chart is False
+
+
 def test_decompose_parses_explicit_parallel_marker() -> None:
     llm = FakeLLM(
         response="NONE\nPARALLEL\nWhat does the Router class do?\nHow is that different from HybridSearch?"

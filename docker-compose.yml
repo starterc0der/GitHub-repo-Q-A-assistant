@@ -30,6 +30,7 @@ services:
       LLM_MODEL: ${LLM_MODEL:-gemini-flash-latest}
       LLM_BULK_MODEL: ${LLM_BULK_MODEL:-gemini-flash-lite-latest}
       PRELOAD_MODELS: ${PRELOAD_MODELS:-true}
+      CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:-}
     volumes:
       # Named volumes, not host bind-mounts: cloned repos, uploaded files, the sqlite
       # db, and downloaded models are scratch/state owned by the container's root user.

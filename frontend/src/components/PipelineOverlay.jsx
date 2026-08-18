@@ -3,7 +3,7 @@ import { RagErrorBoundary } from "./RagErrorBoundary.jsx";
 import { RagVectorModal } from "./RagVectorModal.jsx";
 import { useStageRunner } from "../hooks/useStageRunner.js";
 import { ingestStagesFor, IngestSections, IngestStageList } from "../views/IngestView.jsx";
-import { RETRIEVAL_STAGES, RetrievalSections, RetrievalStageList } from "../views/RetrievalView.jsx";
+import { RetrievalSections, RetrievalStageList, retrievalStagesFor } from "../views/RetrievalView.jsx";
 
 // A meta trace ({meta, question, history, answer_text}) has no retrieval stages at all —
 // this is literally the whole request: the raw transcript sent to the bulk model, and
@@ -53,7 +53,7 @@ function MetaSection({ data }) {
 export function PipelineOverlay({ mode, data, title, onClose }) {
   const isQuery = mode === "query";
   const isMeta = isQuery && !!data.meta;
-  const stages = isMeta ? [] : isQuery ? RETRIEVAL_STAGES : ingestStagesFor(data.kind);
+  const stages = isMeta ? [] : isQuery ? retrievalStagesFor(data) : ingestStagesFor(data.kind);
   const ids = stages.map((s) => s.id);
   const runner = useStageRunner(ids);
   const [current, setCurrent] = useState(ids[0]);

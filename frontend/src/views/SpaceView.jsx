@@ -92,7 +92,7 @@ export function SpaceView({ spaceId, onBack }) {
       <div className="rag-space__main">
         {tab === "chat" && <ChatMain {...chat} />}
         {tab === "sources" && <SourcesMain {...sourcesCtl} />}
-        {tab === "insights" && <InsightsMain spaceName={space.name} ctl={insightsCtl} />}
+        {tab === "insights" && <InsightsMain spaceId={spaceId} spaceName={space.name} ctl={insightsCtl} />}
       </div>
     </div>
   );

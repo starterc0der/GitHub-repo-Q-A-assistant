@@ -83,6 +83,15 @@ export const listMessages = (chatId) => request(`/chats/${chatId}/messages`);
 export const messageTrace = (id) => request(`/messages/${id}/trace`);
 export const messageVectors = (id) => request(`/messages/${id}/vectors`);
 
+// -------------------------------------------------------------- connectors
+
+export const listConnectors = (spaceId) => request(`/spaces/${spaceId}/connectors`);
+export const testConnectorCredentials = (spaceId, body) => post(`/spaces/${spaceId}/connectors/test`, body);
+export const createConnector = (spaceId, body) => post(`/spaces/${spaceId}/connectors`, body);
+export const retestConnector = (id) => post(`/connectors/${id}/test`, {});
+export const replaceConnectorCredentials = (id, body) => post(`/connectors/${id}/replace`, body);
+export const deleteConnector = (id) => del(`/connectors/${id}`);
+
 // ----------------------------------------------------------------- insights
 
 export const spaceInsights = (spaceId, range) => {

@@ -135,18 +135,19 @@ def _insert_message(
     cache_match_score: float | None = None,
     trace: str | None = None,
     chart: str | None = None,
+    table: str | None = None,
 ) -> str:
     message_id = new_id()
     with connect(settings.db_path) as conn:
         conn.execute(
             "INSERT INTO messages "
             "(id, chat_id, seq, role, content, standalone_question, cache_hit, cached_from, "
-            "cache_kind, cache_match_question, cache_match_score, trace, chart, created_at) "
-            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
+            "cache_kind, cache_match_question, cache_match_score, trace, chart, table_data, created_at) "
+            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
             (
                 message_id, chat_id, role, content, standalone_question,
                 int(cache_hit), cached_from, cache_kind, cache_match_question, cache_match_score,
-                trace, chart, now(), chat_id,
+                trace, chart, table, now(), chat_id,
             ),
         )
     return message_id
@@ -265,6 +266,7 @@ def delete_chat(chat_id: str) -> dict[str, str]:
 
 def _parse_chart(row: dict[str, object]) -> dict[str, object]:
     row["chart"] = json.loads(row["chart"]) if row.get("chart") else None
+    row["table"] = json.loads(row["table"]) if row.get("table") else None
     return row
 
 
@@ -273,7 +275,7 @@ def list_messages(chat_id: str) -> dict[str, object]:
     _get_chat_row(chat_id)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
-            "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, created_at, "
+            "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, table_data AS \"table\", created_at, "
             "(trace IS NOT NULL) AS has_trace FROM messages WHERE chat_id=? ORDER BY seq",
             (chat_id,),
         ).fetchall()
@@ -420,7 +422,12 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
     )
 
     cache_ms: float | None = None
-    if not history:
+    # A live-data question's answer is a live sensor reading, not a fact — caching it
+    # under the exact question text would serve a stale reading forever on any repeat of
+    # the same wording, since the cache has no way to know the underlying data changed
+    # since. Skip lookup too, not just the write: an entry cached before this guard
+    # existed (or an old build) must not keep getting served.
+    if not history and not route.wants_live_data:
         cache_started = time.monotonic()
         cached = _cache_lookup(space_id, raw_question)
         cache_ms = (time.monotonic() - cache_started) * 1000
@@ -434,7 +441,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
             assistant_id = _insert_message(
                 chat_id, "assistant", cached["content"],
                 cache_hit=True, cached_from=cached["id"], trace=json.dumps(cached_trace),
-                chart=cached["chart"], cache_kind=cached["cache_kind"],
+                chart=cached["chart"], table=cached["table_data"], cache_kind=cached["cache_kind"],
                 cache_match_question=cached["cache_match_question"],
                 cache_match_score=cached["cache_match_score"],
             )
@@ -460,16 +467,21 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
         trace.timings["cache"] = cache_ms
     trace_dict = asdict(trace)
     answer = trace_dict.get("answer") or {}
-    # answer.text is "" (not missing) on an LLM failure — `or` catches that; a plain
-    # dict.get default would not, since the key is present.
-    content = answer.get("text") or answer.get("error") or pipeline.NO_MATCH
     chart = answer.get("chart")
+    table = answer.get("table")
+    # answer.text is legitimately "" (not missing) in two different cases that must not
+    # be confused: an LLM failure (falls through to error, then NO_MATCH) — or a
+    # live-data reply that's purely a ```table block with no surrounding prose, which is
+    # a real, valid answer, not a failure. NO_MATCH is only right when there's neither
+    # text NOR a chart/table to show.
+    content = answer.get("text") or answer.get("error") or ("" if (chart or table) else pipeline.NO_MATCH)
     assistant_id = _insert_message(
         chat_id, "assistant", content, trace=json.dumps(trace_dict),
         chart=json.dumps(chart) if chart else None,
+        table=json.dumps(table) if table else None,
     )
 
-    if not history:
+    if not history and not route.wants_live_data:
         _cache_put(space_id, raw_question, assistant_id)
     _set_title_if_new(chat_id, raw_question)
     _touch_chat(chat_id)
@@ -479,7 +491,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
 def _get_message(message_id: str) -> dict[str, object]:
     with connect(settings.db_path) as conn:
         row = conn.execute(
-            "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, created_at, "
+            "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, table_data AS \"table\", created_at, "
             "(trace IS NOT NULL) AS has_trace FROM messages WHERE id=?",
             (message_id,),
         ).fetchone()

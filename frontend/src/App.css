@@ -45,6 +45,15 @@
 .rag-input--mono { font-family: var(--mono); }
 .rag-input:disabled { opacity: 0.65; }
 .rag-input:focus { outline: 2px solid var(--accent-border); outline-offset: 1px; }
+
+.rag-password-field { position: relative; display: flex; }
+.rag-password-field .rag-input { padding-right: 36px; }
+.rag-password-field__toggle {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  border: none; background: none; font-size: 14px; line-height: 1; padding: 6px; border-radius: 6px; cursor: pointer;
+}
+.rag-password-field__toggle:hover:not(:disabled) { background: var(--panel-2); }
+.rag-password-field__toggle:disabled { opacity: 0.5; cursor: default; }
 .rag-btn {
   margin-top: 10px; border: none; border-radius: 7px; padding: 9px 14px;
   background: var(--accent); color: white; font-weight: 600; font-size: 13.5px;
@@ -450,6 +459,7 @@
 }
 .rag-modal-card {
   background: var(--panel); border-radius: 14px; padding: 22px 24px; width: 100%; max-width: 420px;
+  max-height: calc(100vh - 40px); overflow-y: auto;
   display: flex; flex-direction: column; gap: 6px; box-shadow: 0 20px 50px oklch(0% 0 0 / 0.2);
 }
 .rag-modal-card h2 { margin: 0 0 8px; font-size: 17px; }
@@ -520,7 +530,7 @@
 .rag-sources__filter-count { font-family: var(--mono); font-size: 11px; opacity: 0.75; }
 
 .rag-sources__main { flex: 1; min-width: 0; overflow-y: auto; }
-.rag-sources__container { max-width: 1200px; margin: 0 auto; padding: 32px 24px 60px; }
+.rag-sources__container { padding: 32px 24px 60px; }
 .rag-sources__header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
 .rag-sources__header h2 { font-size: 19px; margin: 0; }
 .rag-sources__header p { font-size: 13px; color: var(--ink-dim); margin: 4px 0 0; }
@@ -584,8 +594,8 @@
    for readability. Splitting these two jobs across two elements is what fixes a
    scrollbar that otherwise hugs the narrow column instead of the window edge. */
 .rag-chat__messages-viewport { flex: 1; overflow-y: auto; }
-.rag-chat__messages { padding: 24px; display: flex; flex-direction: column; gap: 12px; max-width: 1200px; margin: 0 auto; width: 100%; }
-.rag-chat__composer { display: flex; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); max-width: 1200px; margin: 0 auto; width: 100%; }
+.rag-chat__messages { padding: 24px; display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.rag-chat__composer { display: flex; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); width: 100%; }
 .rag-chat__composer .rag-input { margin: 0; }
 .rag-chat__composer .rag-btn, .rag-chat__composer .rag-btn--ghost { margin-top: 0; flex-shrink: 0; }
 
@@ -626,6 +636,17 @@
 .rag-bubble--user .rag-chart__legend-item { color: white; opacity: 0.9; }
 .rag-chart__swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 
+/* ```table block (see live_data.TableParser) — the live-data answer's default format */
+.rag-data-table__scroll { max-width: 100%; overflow-x: auto; margin-top: 8px; }
+.rag-data-table { border-collapse: collapse; font-size: 12.5px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.rag-bubble--user .rag-data-table { background: oklch(100% 0 0 / 0.12); border-color: oklch(100% 0 0 / 0.25); }
+.rag-data-table th, .rag-data-table td { padding: 6px 12px; text-align: left; white-space: nowrap; }
+.rag-data-table th { font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--ink-faint); background: var(--panel-2); border-bottom: 1px solid var(--border); }
+.rag-bubble--user .rag-data-table th { color: white; opacity: 0.75; background: oklch(100% 0 0 / 0.08); border-color: oklch(100% 0 0 / 0.25); }
+.rag-data-table td { font-family: var(--mono); border-bottom: 1px solid var(--panel-2); }
+.rag-bubble--user .rag-data-table td { border-color: oklch(100% 0 0 / 0.15); }
+.rag-data-table tr:last-child td { border-bottom: none; }
+
 /* fullscreen pipeline-breakdown overlay (query or ingest trace) */
 .rag-overlay { position: fixed; inset: 0; z-index: 150; background: var(--bg); display: flex; flex-direction: column; animation: ragFadeIn 0.2s ease both; }
 .rag-overlay__head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; padding: 16px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -655,7 +676,31 @@
 .rag-insight-card__value { display: block; font-size: 22px; font-weight: 700; font-family: var(--mono); line-height: 1; }
 .rag-insight-card__sub { display: block; font-size: 10.5px; color: var(--ink-faint); margin-top: 6px; }
 
+/* KPI card: label, big value, sparkline + delta badge along the bottom */
+.rag-kpi-card { min-width: 0; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.rag-kpi-card__label { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint); }
+.rag-kpi-card__value { font-size: 25px; font-weight: 700; font-family: var(--mono); line-height: 1; }
+.rag-kpi-card__foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rag-kpi-card__spark { width: 92px; height: 28px; display: block; overflow: visible; }
+
+.rag-delta { font-size: 11px; font-weight: 700; font-family: var(--mono); white-space: nowrap; }
+.rag-delta--up { color: var(--accent2-ink); }
+.rag-delta--down { color: var(--warn-ink); }
+.rag-delta--flat { color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+
+/* Gauge card: current level + progress bar + a strip of mini trend bars */
+.rag-gauge-card { min-width: 0; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 20px 18px; display: flex; flex-direction: column; gap: 10px; justify-content: space-between; }
+.rag-gauge-card__label { font-size: 13.5px; font-weight: 700; }
+.rag-gauge-card__top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.rag-gauge-card__value { font-size: 27px; font-weight: 700; font-family: var(--mono); }
+.rag-gauge-card__bar { width: 100%; height: 9px; border-radius: 5px; background: var(--panel-2); overflow: hidden; }
+.rag-gauge-card__bar-fill { height: 100%; border-radius: 5px; }
+.rag-gauge-card__trend { display: flex; align-items: flex-end; gap: 2px; height: 26px; width: 100%; margin-top: 2px; }
+.rag-gauge-card__trend-bar { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; cursor: pointer; }
+.rag-gauge-card__note { font-size: 10.5px; color: var(--ink-faint); }
+
 .rag-insight-row { display: grid; grid-template-columns: 1.1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.rag-insight-row--token { grid-template-columns: 1.3fr 1fr 1fr; }
 .rag-insight-panel { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); padding: 18px 20px; }
 .rag-insight-panel__title { font-size: 13px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
 .rag-insight-panel__legend { display: flex; gap: 12px; font-size: 10.5px; font-weight: 600; color: var(--ink-faint); }
@@ -666,13 +711,27 @@
 .rag-dot--local { background: var(--border-strong); }
 
 .rag-gate-trend__legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 8px; }
-.rag-gate-trend__svg { width: 100%; height: 150px; display: block; }
+.rag-gate-trend__svg { width: 100%; height: 150px; display: block; cursor: crosshair; }
+.rag-chart__guide { stroke: var(--ink-faint); stroke-width: 1; stroke-dasharray: 2 2; pointer-events: none; }
+
+/* Floating hover tooltip for charts — position:relative anchor + percentage-based
+   left/top set inline per-hover by the chart component (see ChartTooltip). */
+.rag-chart-hover-wrap { position: relative; }
+.rag-chart-tooltip {
+  position: absolute; transform: translate(-50%, -100%); background: var(--panel); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 10px 24px oklch(0% 0 0 / 0.16); padding: 9px 11px; font-size: 11.5px;
+  line-height: 1.55; white-space: nowrap; pointer-events: none; z-index: 10;
+}
+.rag-chart-tooltip__title { font-weight: 700; font-size: 11px; margin-bottom: 3px; }
+.rag-chart-tooltip__row { display: flex; align-items: center; gap: 6px; }
+.rag-chart-tooltip__dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; display: inline-block; }
 .rag-gate-bar__legend-item { display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; color: var(--ink-dim); white-space: nowrap; }
 .rag-gate-bar__legend-item .rag-mono { margin-left: 2px; }
 .rag-gate-bar__dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
 .rag-gate-bar__dot--accent2 { background: var(--accent2); }
 .rag-gate-bar__dot--warn { background: var(--warn); }
 .rag-gate-bar__dot--accent { background: var(--accent); }
+.rag-gate-bar__dot--doc { background: var(--doc); }
 
 .rag-stage-bars { display: flex; flex-direction: column; gap: 7px; }
 .rag-stage-bars__row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
@@ -683,11 +742,16 @@
 .rag-stage-bars__fill--local { background: var(--border-strong); }
 .rag-stage-bars__ms { width: 46px; flex-shrink: 0; text-align: right; color: var(--ink-faint); }
 
-.rag-cache-hist { display: flex; align-items: flex-end; gap: 6px; flex: 1; min-height: 100px; border-bottom: 1px solid var(--border-strong); padding-bottom: 2px; }
-.rag-cache-hist__col { flex: 1; height: 100%; display: flex; align-items: flex-end; }
-.rag-cache-hist__bar { width: 100%; background: var(--accent2); border-radius: 4px 4px 0 0; min-height: 2px; }
-.rag-cache-hist__bar--empty { background: var(--panel-2); }
-.rag-cache-hist__axis { display: flex; justify-content: space-between; margin-top: 6px; font-size: 9.5px; color: var(--ink-faint); }
+.rag-topfiles { display: flex; flex-direction: column; }
+.rag-topfiles__row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--panel-2); }
+.rag-topfiles__row:last-child { border-bottom: none; }
+.rag-topfiles__path { width: 230px; flex-shrink: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rag-topfiles__track { position: relative; flex: 1; height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.rag-topfiles__fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; }
+.rag-topfiles__fill--candidates { background: var(--border-strong); }
+.rag-topfiles__fill--used { background: var(--accent2); }
+.rag-topfiles__count { width: 60px; flex-shrink: 0; text-align: right; font-size: 11px; color: var(--ink-dim); }
+.rag-topfiles__score { width: 50px; flex-shrink: 0; text-align: right; font-size: 11px; color: var(--ink-faint); }
 
 .rag-date-range { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
 .rag-date-range__label { font-size: 11.5px; font-weight: 600; color: var(--ink-dim); }
@@ -708,6 +772,13 @@
 .rag-insight-table__strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rag-insight-table__truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .rag-insight-table__model { font-size: 11px; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.rag-pagination {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 20px; font-size: 12px; border-top: 1px solid var(--border);
+}
+.rag-pagination__buttons { display: flex; align-items: center; gap: 10px; }
+.rag-pagination__btn { padding: 5px 11px; font-size: 12px; border-radius: 8px; }
 
 .rag-filter-btn {
   border: 1px solid var(--border-strong); background: var(--panel); color: var(--ink-dim);

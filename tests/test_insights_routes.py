@@ -6,9 +6,11 @@ from src.api.insights_routes import (
     MAX_RANGE_DAYS,
     _cache_hit_by_day,
     _daily_buckets,
+    _decomposition_by_day,
     _faithful_or_none,
     _faithfulness_by_day,
     _gate_outcomes_by_day,
+    _latency_by_day,
     _resolve_range,
     _tokens_by_day,
 )
@@ -16,7 +18,8 @@ from src.api.insights_routes import (
 
 def _msg(
     created_at: str, cache_hit: bool = False, prompt_tokens: int = 0, completion_tokens: int = 0,
-    citations: list[list[str]] | None = None,
+    citations: list[list[str]] | None = None, timings: dict[str, float] | None = None,
+    sub_questions: list[str] | None = None,
 ) -> dict:
     """citations: one list of chunk_ids per claim, e.g. [["c1"], []] = 2 claims, 2nd unsupported."""
     return {
@@ -25,6 +28,8 @@ def _msg(
         "trace_obj": {
             "tokens": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
             "answer": {"citations": [{"chunk_ids": ids} for ids in citations]} if citations is not None else {},
+            "timings": timings,
+            "sub_questions": sub_questions,
         },
     }
 
@@ -179,3 +184,29 @@ def test_tokens_by_day_sums_prompt_and_completion_tokens() -> None:
     result = _tokens_by_day(daily)
 
     assert result[0] == {"date": "2026-01-01", "prompt_tokens": 100, "completion_tokens": 10}
+
+
+def test_latency_by_day_reports_null_on_a_day_with_no_timed_messages() -> None:
+    daily = _daily_buckets(
+        [_msg("2026-01-01", timings={"generate": 800.0, "rerank": 200.0})], "2026-01-01", "2026-01-02"
+    )
+
+    result = _latency_by_day(daily)
+
+    assert result[0]["avg_ms"] == 1000.0
+    assert result[1]["avg_ms"] is None
+
+
+def test_decomposition_by_day_reports_null_on_a_day_with_no_questions() -> None:
+    daily = _daily_buckets(
+        [
+            _msg("2026-01-01", sub_questions=["a", "b"]),
+            _msg("2026-01-01", sub_questions=["a"]),
+        ],
+        "2026-01-01", "2026-01-02",
+    )
+
+    result = _decomposition_by_day(daily)
+
+    assert result[0]["rate"] == 0.5
+    assert result[1]["rate"] is None

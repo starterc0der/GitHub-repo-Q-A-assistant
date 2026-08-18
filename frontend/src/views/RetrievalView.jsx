@@ -1,4 +1,6 @@
 import { Fragment } from "react";
+import { BarChart } from "../components/BarChart.jsx";
+import { DataTable } from "../components/DataTable.jsx";
 import { RagChunkCard, RagEmbedding, RagScorePill, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
 import {
   RagVectorSpace,
@@ -18,6 +20,17 @@ export const RETRIEVAL_STAGES = [
   { id: "prompt", title: "Final prompt" },
   { id: "answer", title: "LLM answer" },
 ];
+
+// A live-data question (see Pipeline._try_live_data_answer) skips rerank/compress
+// entirely and fetches from Redis instead — its own stage in the rail, shown only when
+// that path actually ran, right before "Final prompt" since the fetched readings are
+// what the prompt is built from.
+export function retrievalStagesFor(data) {
+  if (!data.live_data_tool) return RETRIEVAL_STAGES;
+  const stages = [...RETRIEVAL_STAGES];
+  stages.splice(5, 0, { id: "tool", title: "Tool called" });
+  return stages;
+}
 
 function splitSuffix(data) {
   return data.sub_questions?.length ? ` · from ${data.sub_questions.length} sub-qs` : "";
@@ -60,6 +73,13 @@ function retrievalStageMeta(data, id) {
       return data.final_chunks.length === 0
         ? "nothing to compress"
         : `${data.final_chunks.length} final chunks${timingSuffix(data, id)}`;
+    case "tool": {
+      const t = data.live_data_tool;
+      if (!t) return null;
+      const places = t.matched_places.length;
+      const keys = t.redis_keys.length;
+      return `${places} place${places === 1 ? "" : "s"} · ${keys} key${keys === 1 ? "" : "s"} fetched`;
+    }
     case "prompt":
       return `${data.final_prompt.length} chars`;
     case "answer": {
@@ -89,9 +109,10 @@ function AnswerText({ text }) {
 }
 
 export function RetrievalStageList({ data, statuses, current, onSelect }) {
+  const stages = retrievalStagesFor(data);
   return (
     <div className="rag-steps">
-      {RETRIEVAL_STAGES.map((s, i) => (
+      {stages.map((s, i) => (
         <RagStageStep
           key={s.id}
           num={i + 1}
@@ -100,7 +121,7 @@ export function RetrievalStageList({ data, statuses, current, onSelect }) {
           status={statuses[s.id]}
           current={current === s.id}
           onClick={() => onSelect(s.id)}
-          isLast={i === RETRIEVAL_STAGES.length - 1}
+          isLast={i === stages.length - 1}
         />
       ))}
     </div>
@@ -379,6 +400,36 @@ export function RetrievalSections({ data, visible }) {
         </RagSection>
       )}
 
+      {visible.tool && data.live_data_tool && (
+        <RagSection
+          id="tool"
+          num="5b"
+          title="Tool called"
+          description="Rerank/compress were skipped — this question resolved to a place/device match, and its live reading was fetched from Redis instead."
+          plain="Look up which place(s) the question is about, then pull that place's current sensor reading straight from Redis — no chunk ranking needed once the place is known."
+        >
+          <div className="rag-callout">
+            <span className="rag-callout__label">matched place(s)</span>
+            <p className="rag-mono">{data.live_data_tool.matched_places.join(", ")}</p>
+          </div>
+          <p className="rag-hint">Redis keys fetched, and exactly what came back:</p>
+          <ul className="rag-ranked">
+            {data.live_data_tool.redis_keys.map((key) => (
+              <li key={key} style={{ flexDirection: "column", alignItems: "stretch" }}>
+                <span className="rag-mono rag-ranked__path">{key}</span>
+                <pre className="rag-prompt" style={{ marginTop: 6 }}>
+                  {JSON.stringify(data.live_data_tool.readings[key], null, 2) ?? "null (key not found)"}
+                </pre>
+              </li>
+            ))}
+          </ul>
+          <p className="rag-hint">Narrated context built from the readings above, sent to the LLM:</p>
+          <div className="rag-prompt">
+            <pre>{data.live_data_tool.context}</pre>
+          </div>
+        </RagSection>
+      )}
+
       {visible.prompt && (
         <RagSection
           id="prompt"
@@ -410,15 +461,17 @@ export function RetrievalSections({ data, visible }) {
           )}
           <div className="rag-stat-row">
             <div className="rag-stat rag-stat--accent">
-              <span className="rag-stat__n">{data.final_chunks.length}</span>
-              <span className="rag-stat__l">chunks in prompt</span>
+              <span className="rag-stat__n">
+                {data.live_data_tool ? data.live_data_tool.redis_keys.length : data.final_chunks.length}
+              </span>
+              <span className="rag-stat__l">{data.live_data_tool ? "live keys in prompt" : "chunks in prompt"}</span>
             </div>
             <div className="rag-stat">
               <span className="rag-stat__n">{data.final_prompt.length}</span>
               <span className="rag-stat__l">characters</span>
             </div>
           </div>
-          {data.final_chunks.length === 0 && (
+          {data.final_chunks.length === 0 && !data.live_data_tool && (
             <RagEmptyStage title="No prompt was sent">
               <p>
                 With no chunks to ground an answer, the pipeline short-circuits before the
@@ -447,7 +500,12 @@ export function RetrievalSections({ data, visible }) {
           ) : (
             <div className="rag-answer">
               <span className="rag-callout__label">answer</span>
-              <AnswerText text={data.answer.text} />
+              {data.answer.text && <AnswerText text={data.answer.text} />}
+              {data.answer.table && <DataTable table={data.answer.table} />}
+              {data.answer.chart && <BarChart chart={data.answer.chart} />}
+              {!data.answer.text && !data.answer.table && !data.answer.chart && (
+                <p className="rag-hint">(empty — nothing else to show)</p>
+              )}
               <span className="rag-answer__model">{data.answer.model}</span>
             </div>
           )}

@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     repo_clone_dir: str = "./data/repos"
     upload_dir: str = "./data/uploads"
     db_path: str = "./data/app.db"
+    # Encrypts connector passwords at rest (see src/crypto.py) — never plaintext in
+    # sqlite. Generate with: python3 -c "from cryptography.fernet import Fernet;
+    # print(Fernet.generate_key().decode())" and put it in .env. Empty by default so a
+    # fresh checkout fails loudly on first connector use instead of silently storing
+    # plaintext — there's no safe default to ship here.
+    connector_encryption_key: str = ""
     chunk_max_chars: int = 2000
     chunk_overlap: int = 200
     # How many prior turns (user+assistant pairs) are sent to the LLM as chat history.

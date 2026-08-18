@@ -128,6 +128,7 @@ def _daily_buckets(messages: list[dict], range_start: str, range_end: str) -> li
             "gate": _empty_gate_counts(), "total": 0, "cache_hits": 0,
             "prompt_tokens": 0, "completion_tokens": 0,
             "citations_total": 0, "citations_faithful": 0,
+            "latency_sum_ms": 0.0, "latency_count": 0, "decomposed": 0,
         }
 
     by_day: dict[str, dict] = {}
@@ -146,6 +147,11 @@ def _daily_buckets(messages: list[dict], range_start: str, range_end: str) -> li
             bucket["citations_total"] += 1
             if faithful:
                 bucket["citations_faithful"] += 1
+        if m["trace_obj"].get("timings"):
+            bucket["latency_sum_ms"] += _total_latency_ms(m["trace_obj"])
+            bucket["latency_count"] += 1
+        if len(m["trace_obj"].get("sub_questions") or []) > 1:
+            bucket["decomposed"] += 1
 
     start_d, end_d = date.fromisoformat(range_start), date.fromisoformat(range_end)
     out = []
@@ -200,6 +206,22 @@ def _faithfulness_by_day(daily: list[dict]) -> list[dict]:
 def _tokens_by_day(daily: list[dict]) -> list[dict]:
     return [
         {"date": b["date"], "prompt_tokens": b["prompt_tokens"], "completion_tokens": b["completion_tokens"]}
+        for b in daily
+    ]
+
+
+def _latency_by_day(daily: list[dict]) -> list[dict]:
+    """Null avg_ms (not 0) on a day with no timed messages — same "no data" convention
+    as the other day-series."""
+    return [
+        {"date": b["date"], "avg_ms": (b["latency_sum_ms"] / b["latency_count"]) if b["latency_count"] else None}
+        for b in daily
+    ]
+
+
+def _decomposition_by_day(daily: list[dict]) -> list[dict]:
+    return [
+        {"date": b["date"], "total": b["total"], "rate": (b["decomposed"] / b["total"]) if b["total"] else None}
         for b in daily
     ]
 
@@ -266,7 +288,6 @@ def space_insights(space_id: str, start: str | None = None, end: str | None = No
             "avg_latency_ms": (sum(chat_latencies) / len(chat_latencies)) if chat_latencies else 0.0,
             "tokens": chat_tokens,
         })
-    chat_rows.sort(key=lambda r: r["question_count"], reverse=True)
 
     daily = _daily_buckets(messages, range_start, range_end)
 
@@ -282,6 +303,8 @@ def space_insights(space_id: str, start: str | None = None, end: str | None = No
         "cache_hit_by_day": _cache_hit_by_day(daily),
         "faithfulness_by_day": _faithfulness_by_day(daily),
         "tokens_by_day": _tokens_by_day(daily),
+        "latency_by_day": _latency_by_day(daily),
+        "decomposition_by_day": _decomposition_by_day(daily),
         "stage_latency": stage_latency,
         "chats": chat_rows,
         "range_start": range_start,

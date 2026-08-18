@@ -149,6 +149,20 @@ class CompressedChunkTrace:
 
 
 @dataclass
+class LiveDataToolTrace:
+    """What Pipeline._try_live_data_answer actually did before generation — the "tool
+    call" in the pipeline breakdown for a live-data question. `readings` is the raw
+    per-Redis-key payload (or None for a key that came back empty), keyed the same as
+    `redis_keys`; `context` is the exact narrated block that was prepended to the
+    question and sent to the LLM as the live-data prompt (see build_live_data_context)."""
+
+    matched_places: list[str]
+    redis_keys: list[str]
+    readings: dict
+    context: str
+
+
+@dataclass
 class AnswerTrace:
     """The final generation step. Unlike every other stage this one actually calls the
     answer LLM, so a query trace costs one main-model call on top of the compression calls."""
@@ -164,6 +178,14 @@ class AnswerTrace:
     # (NO_MATCH, gated, or a failed generation). The chat UI never renders these; they
     # exist only for the pipeline trace view.
     citations: list[ClaimCitation] = field(default_factory=list)
+    # True when this answer came from Pipeline._try_live_data_answer (a Redis lookup via
+    # a place/device doc match) instead of the normal chunk-grounded generation — no
+    # citations exist on this path since there's no chunk to attribute claims to.
+    live_data: bool = False
+    # {"columns": [...], "rows": [[...], ...]} — set when a live-data answer emitted a
+    # ```table block (see live_data.TableParser). Same shape/lifecycle as chart above,
+    # just a different fenced-block kind for a different question type.
+    table: dict | None = None
 
 
 @dataclass
@@ -221,6 +243,11 @@ class QueryTrace:
     # wants_chart means the answer prompt got an explicit chart-formatting hint.
     is_broad: bool = False
     wants_chart: bool = False
+    # Set only when answer.live_data is True — the Redis fetch behind that answer (see
+    # LiveDataToolTrace). system_prompt/final_prompt above are also swapped to the real
+    # live-data system prompt and context+question on this path, not the normal
+    # chunk-grounded template (which would show zero chunks and be misleading).
+    live_data_tool: LiveDataToolTrace | None = None
 
 
 @dataclass

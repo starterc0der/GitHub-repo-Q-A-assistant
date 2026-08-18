@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS messages (
   cache_match_score REAL,
   trace TEXT,
   chart TEXT,
+  table_data TEXT,
   created_at TEXT NOT NULL,
   UNIQUE (chat_id, seq)
 );
@@ -74,6 +75,37 @@ CREATE TABLE IF NOT EXISTS qa_cache (
   created_at TEXT NOT NULL,
   PRIMARY KEY (space_id, question_hash)
 );
+
+-- encrypted_password is a Fernet ciphertext (see src/crypto.py) — never plain text,
+-- and never selected back out to any API response. A connector is config for a future
+-- tool to use, not a tool itself; nothing here executes a query.
+CREATE TABLE IF NOT EXISTS connectors (
+  id TEXT PRIMARY KEY,
+  space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('redis','postgres')),
+  name TEXT NOT NULL,
+  host TEXT NOT NULL,
+  port INTEGER NOT NULL,
+  database TEXT,
+  username TEXT,
+  encrypted_password TEXT NOT NULL,
+  db_index INTEGER,
+  tls INTEGER NOT NULL DEFAULT 0,
+  ssl INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'untested' CHECK (status IN ('connected','error','untested')),
+  last_tested_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connectors_space ON connectors(space_id);
+
+CREATE TABLE IF NOT EXISTS connector_test_history (
+  id TEXT PRIMARY KEY,
+  connector_id TEXT NOT NULL REFERENCES connectors(id) ON DELETE CASCADE,
+  ok INTEGER NOT NULL,
+  message TEXT NOT NULL DEFAULT '',
+  tested_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connector_history ON connector_test_history(connector_id, tested_at DESC);
 """
 
 
@@ -109,6 +141,8 @@ def init_db(db_path: str) -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
         if "chart" not in columns:
             conn.execute("ALTER TABLE messages ADD COLUMN chart TEXT")
+        if "table_data" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN table_data TEXT")
         if "cache_kind" not in columns:
             conn.execute("ALTER TABLE messages ADD COLUMN cache_kind TEXT")
             conn.execute("ALTER TABLE messages ADD COLUMN cache_match_question TEXT")

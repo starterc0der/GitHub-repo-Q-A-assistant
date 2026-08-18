@@ -10,6 +10,7 @@ SEQUENTIAL_MARKER = "SEQUENTIAL"
 META_MARKER = "META"
 FLAG_BROAD = "BROAD"
 FLAG_CHART = "CHART"
+FLAG_LIVE = "LIVE"
 MAX_HOPS = 3  # caps latency/cost the same way the retry pass caps itself at one attempt
 
 # Shared by both QueryDecomposer (turn 1, no history) and StandaloneRewriter (turn 2+,
@@ -19,16 +20,29 @@ MAX_HOPS = 3  # caps latency/cost the same way the retry pass caps itself at one
 # else is one shared grammar.
 ROUTE_GRAMMAR = (
     "Line 1: space-separated flags from {broad} (needs a wide summary/overview across "
-    "much of the source, not one specific fact) and {chart} (asks for a comparison, "
-    "graph, or chart). Write NONE if neither applies.\n"
+    "much of the source, not one specific fact), {chart} (asks for a comparison, graph, "
+    "or chart), and {live} (asks for a CURRENT/LIVE reading — pressure, flow, or how "
+    "much water has been loaded/consumed — at a named place, as opposed to a static fact "
+    "about that place). Any question using the word \"data\" together with a specific "
+    "place/device/zone (e.g. \"what is the data in zone 8\", \"show me data for X\") is "
+    "always {live} — it means the live sensor reading, never the catalog/mapping entry. "
+    "{live} and {chart} are not exclusive — a request to COMPARE live "
+    "readings across places (e.g. \"compare the pressure at X and Y\") is both {live} "
+    "{chart} together, not {chart} alone. Write NONE if none apply.\n"
     "Line 2: {single} if it is genuinely one question; {parallel} if it is multiple "
     "INDEPENDENT questions (different topics joined by \"and\", or a list of separate "
     "asks, each answerable on its own without the others); {sequential} if answering a "
     "later part REQUIRES the answer to an earlier part first — you could not even search "
     "for it without already knowing that answer (e.g. \"which department had the most "
     "failures, and what policy caused them?\" — you can't search for the policy until you "
-    "know which department)."
-).format(broad=FLAG_BROAD, chart=FLAG_CHART, single=SINGLE_SENTINEL, parallel=PARALLEL_MARKER, sequential=SEQUENTIAL_MARKER)
+    "know which department). A {live} question naming several places or devices (e.g. "
+    "\"data for X and Y\", \"compare X and Y\") is still {single}, never {parallel} — "
+    "looking up each one's live reading together is one lookup, not independent "
+    "sub-questions."
+).format(
+    broad=FLAG_BROAD, chart=FLAG_CHART, live=FLAG_LIVE,
+    single=SINGLE_SENTINEL, parallel=PARALLEL_MARKER, sequential=SEQUENTIAL_MARKER,
+)
 
 DECOMPOSE_SYSTEM_PROMPT = (
     "You classify a question before retrieval runs, so the pipeline can pick the right "
@@ -51,18 +65,18 @@ DECOMPOSE_SYSTEM_PROMPT = (
 )
 
 
-def parse_route_header(lines: list[str]) -> tuple[bool, bool, str, list[str]]:
+def parse_route_header(lines: list[str]) -> tuple[bool, bool, bool, str, list[str]]:
     """Parses the shared flags-line + mode-line header (see ROUTE_GRAMMAR) — returns
-    (is_broad, wants_chart, mode, remaining lines after the header). Shared by
-    QueryDecomposer and StandaloneRewriter so both interpret the same grammar
+    (is_broad, wants_chart, wants_live_data, mode, remaining lines after the header).
+    Shared by QueryDecomposer and StandaloneRewriter so both interpret the same grammar
     identically; each caller still owns what the remaining lines mean for SINGLE mode."""
     if not lines:
-        return False, False, SINGLE_SENTINEL, []
+        return False, False, False, SINGLE_SENTINEL, []
     flags = set(lines[0].strip().upper().split())
-    is_broad, wants_chart = FLAG_BROAD in flags, FLAG_CHART in flags
+    is_broad, wants_chart, wants_live_data = FLAG_BROAD in flags, FLAG_CHART in flags, FLAG_LIVE in flags
     if len(lines) < 2:
-        return is_broad, wants_chart, SINGLE_SENTINEL, []
-    return is_broad, wants_chart, lines[1].strip().upper(), lines[2:]
+        return is_broad, wants_chart, wants_live_data, SINGLE_SENTINEL, []
+    return is_broad, wants_chart, wants_live_data, lines[1].strip().upper(), lines[2:]
 
 
 @dataclass
@@ -72,6 +86,7 @@ class DecomposeResult:
     is_meta: bool = False
     is_broad: bool = False
     wants_chart: bool = False
+    wants_live_data: bool = False
 
 
 HOP_RESOLVE_SYSTEM_PROMPT = (
@@ -145,16 +160,22 @@ class QueryDecomposer:
         if lines[0].strip().upper() == META_MARKER:
             return DecomposeResult("single", [question], is_meta=True)
 
-        is_broad, wants_chart, mode, rest = parse_route_header(lines)
+        is_broad, wants_chart, wants_live_data, mode, rest = parse_route_header(lines)
         if mode == SEQUENTIAL_MARKER:
             hops = rest[:MAX_HOPS]
             if len(hops) > 1:
-                return DecomposeResult("sequential", hops, is_broad=is_broad, wants_chart=wants_chart)
+                return DecomposeResult(
+                    "sequential", hops, is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+                )
         elif mode == PARALLEL_MARKER:
             parts = rest[: self.max_subquestions]
             if len(parts) > 1:
-                return DecomposeResult("parallel", parts, is_broad=is_broad, wants_chart=wants_chart)
-        return DecomposeResult("single", [question], is_broad=is_broad, wants_chart=wants_chart)
+                return DecomposeResult(
+                    "parallel", parts, is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+                )
+        return DecomposeResult(
+            "single", [question], is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+        )
 
     def resolve_hop(self, input_question: str, input_context: str, template: str, placeholder: str) -> str:
         """Turns a later hop's placeholder (e.g. "{hop1}") into a clean, self-contained
