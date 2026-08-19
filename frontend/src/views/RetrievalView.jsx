@@ -1,5 +1,6 @@
 import { Fragment } from "react";
 import { BarChart } from "../components/BarChart.jsx";
+import { TrendChart } from "../components/TrendChart.jsx";
 import { DataTable } from "../components/DataTable.jsx";
 import { RagChunkCard, RagEmbedding, RagScorePill, RagSection, RagStageStep, RagTag } from "../components/RagAtoms.jsx";
 import {
@@ -21,12 +22,12 @@ export const RETRIEVAL_STAGES = [
   { id: "answer", title: "LLM answer" },
 ];
 
-// A live-data question (see Pipeline._try_live_data_answer) skips rerank/compress
-// entirely and fetches from Redis instead — its own stage in the rail, shown only when
-// that path actually ran, right before "Final prompt" since the fetched readings are
-// what the prompt is built from.
+// A live-data or report question (see Pipeline._try_live_data_answer /
+// _try_report_answer) skips rerank/compress entirely and fetches from Redis/Postgres
+// instead — its own stage in the rail, shown only when one of those paths actually ran,
+// right before "Final prompt" since the fetched data is what the prompt is built from.
 export function retrievalStagesFor(data) {
-  if (!data.live_data_tool) return RETRIEVAL_STAGES;
+  if (!data.live_data_tool && !data.report_tool) return RETRIEVAL_STAGES;
   const stages = [...RETRIEVAL_STAGES];
   stages.splice(5, 0, { id: "tool", title: "Tool called" });
   return stages;
@@ -74,11 +75,18 @@ function retrievalStageMeta(data, id) {
         ? "nothing to compress"
         : `${data.final_chunks.length} final chunks${timingSuffix(data, id)}`;
     case "tool": {
-      const t = data.live_data_tool;
-      if (!t) return null;
-      const places = t.matched_places.length;
-      const keys = t.redis_keys.length;
-      return `${places} place${places === 1 ? "" : "s"} · ${keys} key${keys === 1 ? "" : "s"} fetched`;
+      if (data.live_data_tool) {
+        const t = data.live_data_tool;
+        const places = t.matched_places.length;
+        const keys = t.redis_keys.length;
+        return `${places} place${places === 1 ? "" : "s"} · ${keys} key${keys === 1 ? "" : "s"} fetched`;
+      }
+      if (data.report_tool) {
+        const t = data.report_tool;
+        const places = t.matched_places.length;
+        return `${places} place${places === 1 ? "" : "s"} · ${t.metric}/${t.granularity} · ${t.start_date}${t.start_date === t.end_date ? "" : ` to ${t.end_date}`}`;
+      }
+      return null;
     }
     case "prompt":
       return `${data.final_prompt.length} chars`;
@@ -430,6 +438,33 @@ export function RetrievalSections({ data, visible }) {
         </RagSection>
       )}
 
+      {visible.tool && data.report_tool && (
+        <RagSection
+          id="tool"
+          num="5b"
+          title="Tool called"
+          description="Rerank/compress were skipped — this question resolved to a place match and a time window, and its historical reading was fetched from Postgres (watco_stream_db) instead."
+          plain="Look up which place(s) the question is about and which time window it covers, then pull that window's report data straight from the database — no chunk ranking needed once both are known."
+        >
+          <div className="rag-callout">
+            <span className="rag-callout__label">matched place(s)</span>
+            <p className="rag-mono">{data.report_tool.matched_places.join(", ")}</p>
+          </div>
+          <div className="rag-callout" style={{ marginTop: 10 }}>
+            <span className="rag-callout__label">resolved window</span>
+            <p className="rag-mono">
+              {data.report_tool.metric} · {data.report_tool.granularity} ·{" "}
+              {data.report_tool.start_date}
+              {data.report_tool.start_date === data.report_tool.end_date ? "" : ` to ${data.report_tool.end_date}`}
+            </p>
+          </div>
+          <p className="rag-hint">Narrated context built from the fetched data, sent to the LLM:</p>
+          <div className="rag-prompt">
+            <pre>{data.report_tool.context}</pre>
+          </div>
+        </RagSection>
+      )}
+
       {visible.prompt && (
         <RagSection
           id="prompt"
@@ -462,16 +497,22 @@ export function RetrievalSections({ data, visible }) {
           <div className="rag-stat-row">
             <div className="rag-stat rag-stat--accent">
               <span className="rag-stat__n">
-                {data.live_data_tool ? data.live_data_tool.redis_keys.length : data.final_chunks.length}
+                {data.live_data_tool
+                  ? data.live_data_tool.redis_keys.length
+                  : data.report_tool
+                    ? data.report_tool.matched_places.length
+                    : data.final_chunks.length}
               </span>
-              <span className="rag-stat__l">{data.live_data_tool ? "live keys in prompt" : "chunks in prompt"}</span>
+              <span className="rag-stat__l">
+                {data.live_data_tool ? "live keys in prompt" : data.report_tool ? "places in prompt" : "chunks in prompt"}
+              </span>
             </div>
             <div className="rag-stat">
               <span className="rag-stat__n">{data.final_prompt.length}</span>
               <span className="rag-stat__l">characters</span>
             </div>
           </div>
-          {data.final_chunks.length === 0 && !data.live_data_tool && (
+          {data.final_chunks.length === 0 && !data.live_data_tool && !data.report_tool && (
             <RagEmptyStage title="No prompt was sent">
               <p>
                 With no chunks to ground an answer, the pipeline short-circuits before the
@@ -502,7 +543,7 @@ export function RetrievalSections({ data, visible }) {
               <span className="rag-callout__label">answer</span>
               {data.answer.text && <AnswerText text={data.answer.text} />}
               {data.answer.table && <DataTable table={data.answer.table} />}
-              {data.answer.chart && <BarChart chart={data.answer.chart} />}
+              {data.answer.chart && (data.answer.chart.kind === "trend" ? <TrendChart chart={data.answer.chart} /> : <BarChart chart={data.answer.chart} />)}
               {!data.answer.text && !data.answer.table && !data.answer.chart && (
                 <p className="rag-hint">(empty — nothing else to show)</p>
               )}

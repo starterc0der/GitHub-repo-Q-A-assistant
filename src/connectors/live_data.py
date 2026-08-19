@@ -79,10 +79,11 @@ class TableParser:
         match = TABLE_PATTERN.search(text)
         if not match:
             return text, None
-        table = self._validate(match.group(1))
-        if table is None:
-            return text, None
-        return (text[: match.start()] + text[match.end() :]).strip(), table
+        # Strip the fenced block whether or not it parsed — see ChartParser.extract's
+        # matching comment; a malformed block is the model's ATTEMPT at a table, not
+        # prose worth keeping visible.
+        stripped = (text[: match.start()] + text[match.end() :]).strip()
+        return stripped, self._validate(match.group(1))
 
     def _validate(self, raw: str) -> dict | None:
         try:
@@ -156,13 +157,28 @@ def parse_place_blocks(text: str) -> list[PlaceDevices]:
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
+# Common English function words carry no place-identifying signal, but count toward
+# token-overlap scoring just like a real word unless filtered — confirmed to cause a
+# real false match: "Road_6_to_Road_8" (a real BBSR sub-place) overlapped an unrelated
+# question on "to" (boilerplate connector, plus leftover from date-phrase stripping)
+# PLUS a coincidental "8" (from "Zone 08", nothing to do with the road's own numbering),
+# crossing the match threshold together where neither alone would have.
+_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "for", "in", "and", "or", "to", "at", "is", "on", "with",
+    "from", "by", "this", "that", "it", "as", "be", "are", "was", "were",
+})
+
 
 def _tokens(text: str) -> set[str]:
     # Strip leading zeros so "zone 8" overlaps "Zone_08_..." — zero-padded numbering in
     # these place names is a formatting detail, not something a user typing a shorthand
     # reference is expected to reproduce. `or t` guards an all-zero token ("00") from
     # collapsing to an empty string.
-    return {t.lstrip("0") or t for t in _WORD_RE.findall(text.lower())}
+    return {
+        t.lstrip("0") or t
+        for t in _WORD_RE.findall(text.lower())
+        if t not in _STOPWORDS
+    }
 
 
 def _normalized(text: str) -> str:
@@ -183,21 +199,32 @@ def find_matching_places(question: str, places: list[PlaceDevices]) -> list[Plac
     a point's device id (e.g. "status of device 00-80-F4-2D-32-35"). A device id's
     individual hex fragments ("00", "35") are too short and common to score by token
     overlap without false-positiving on unrelated questions, so a whole-id substring
-    match is scored as a strong, unambiguous hit instead."""
+    match is scored as a strong, unambiguous hit instead.
+
+    A lone overlapping token is usually noise — "zone" and "ESR" are generic words
+    shared by nearly every place/point name in the CTC dataset — UNLESS that one token
+    IS the entire PLACE name (e.g. "Acharyavihar", a real single-word BBSR/Puri place
+    name): then every one of the name's tokens is present, so it's a full match, not a
+    partial one, and gets the same strong-match exemption as a device id hit. This
+    exemption deliberately does NOT extend to a sub-place/point LOCATION — "ESR" is
+    itself a single-token location shared by nearly every place's inlet, so a bare
+    question like "...ESR (inlet)..." would otherwise strong-match almost the entire
+    corpus (confirmed: it did, matching 17 of ~20 places, before this was scoped to
+    place names only)."""
     q_tokens = _tokens(question)
     q_normalized = _normalized(question)
     scored: dict[str, tuple[int, PlaceDevices]] = {}
     for place in places:
-        score = len(q_tokens & _tokens(place.place_name))
+        place_tokens = _tokens(place.place_name)
+        score = len(q_tokens & place_tokens)
+        if place_tokens and place_tokens <= q_tokens:
+            score = max(score, 10)
         for point in place.points:
-            score = max(score, len(q_tokens & _tokens(point.location)))
+            loc_tokens = _tokens(point.location)
+            score = max(score, len(q_tokens & loc_tokens))
             device_id_normalized = _normalized(point.device_id)
             if device_id_normalized and device_id_normalized in q_normalized:
                 score = max(score, 10)
-        # A single overlapping token isn't enough to trust — "zone" and "ESR" are
-        # generic words shared by nearly every place/point name in this dataset, so a
-        # score of 1 is usually just that noise, not a real match. A device id hit
-        # (scored 10, well above this) is exempt by construction.
         if score < 2:
             continue
         existing = scored.get(place.place_name)

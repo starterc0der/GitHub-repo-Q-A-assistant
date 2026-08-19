@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from datetime import date
+
 from src.cancellation import Cancelled, check
 from src.config import Settings
 from src.connectors.live_data import (
@@ -20,6 +22,14 @@ from src.connectors.live_data import (
     fetch_live_readings,
     find_matching_places,
     parse_place_blocks,
+)
+from src.connectors.reports import (
+    ReportWindowResolver,
+    build_report_block,
+    build_report_context,
+    fetch_report_data,
+    infer_chart_kind,
+    strip_date_phrases,
 )
 from src.generate.answer import SYSTEM_PROMPT, AnswerGenerator
 from src.generate.decomposer import DecomposeResult, QueryDecomposer
@@ -56,6 +66,7 @@ from src.trace import (
     IngestTrace,
     LiveDataToolTrace,
     QueryTrace,
+    ReportToolTrace,
     RerankedChunkTrace,
     RoutedFile,
     ScoredChunkTrace,
@@ -145,6 +156,16 @@ class _RetrievalState:
     is_broad: bool = False
     wants_chart: bool = False
     wants_live_data: bool = False
+    wants_report: bool = False
+    # Every chunk of the top-routed source(s), fetched whole — only populated for a
+    # live-data/report question (see _finish_retrieval). scored_candidates is capped at
+    # hybrid_candidate_k shared across every routed source in the space; a small
+    # reference doc (a place/device list) can lose chunks to that cap once it's sharing
+    # the space with enough competing content, silently dropping some of its places from
+    # what _try_live_data_answer/_try_report_answer ever see. These docs are cheap to
+    # read in full (a handful of chunks), so for a tool-answer question there's no
+    # reason to rely on the cap being generous enough — see _live_data_candidate_chunks.
+    tool_source_chunks: list[CodeChunk] = field(default_factory=list)
 
 
 class Pipeline:
@@ -181,6 +202,7 @@ class Pipeline:
         self.rewriter = StandaloneRewriter(bulk_llm, settings.max_subquestions)
         self.intent_classifier = BroadIntentClassifier(bulk_llm)
         self.decomposer = QueryDecomposer(bulk_llm, settings.max_subquestions)
+        self.report_window_resolver = ReportWindowResolver(bulk_llm)
         self.faithfulness_checker = FaithfulnessChecker(bulk_llm)
         self.claim_attributor = ClaimAttributor(bulk_llm)
         self.conversation_memory = ConversationMemory(bulk_llm)
@@ -592,6 +614,26 @@ class Pipeline:
             text=answer.text, model=self.settings.llm_model, chart=answer.chart, citations=citations
         )
 
+    @staticmethod
+    def _match_places_in_chunks(question: str, chunks: list[CodeChunk]) -> list[PlaceDevices]:
+        """Shared first step of both _try_live_data_answer and _try_report_answer:
+        parse every place/device block out of the given chunks (deduped, since a place
+        can appear in more than one retrieved chunk) and pick which one(s) the question
+        is actually about (see find_matching_places — a question can name more than one
+        place, or a device id instead of a place name). Capped at 5 so a "give me
+        everything" question doesn't blow up the context/table unboundedly. Empty list
+        means "can't identify a place here" — callers fall back to the normal answer."""
+        all_places: list[PlaceDevices] = []
+        seen_chunk_ids: set[str] = set()
+        for chunk in chunks:
+            if chunk.id in seen_chunk_ids:
+                continue
+            seen_chunk_ids.add(chunk.id)
+            all_places.extend(parse_place_blocks(chunk.code))
+        if not all_places:
+            return []
+        return find_matching_places(question, all_places)[:5]
+
     def _try_live_data_answer(
         self, question: str, space_id: str, chunks: list[CodeChunk]
     ) -> tuple[str, dict | None, LiveDataToolTrace] | None:
@@ -603,9 +645,7 @@ class Pipeline:
         unrelated sources, a razor-thin routing-score gap can send the generic
         wide-fallback path after the wrong (huge) source entirely, leaving final_chunks
         empty even though hybrid search's own per-chunk candidates found the right one
-        fine. This extracts every place the question is about (see
-        find_matching_places — a question can name more than one place, or a device id
-        instead of a place name), fetches each one's live readings, and narrates them.
+        fine. Fetches each matched place's live readings and narrates them.
         Returns (text, table) — table is the parsed ```table block (see
         live_data.TableParser) when the model emitted one, else None; the answer prompt
         defaults to a table unless the question explicitly asked for something else.
@@ -614,19 +654,9 @@ class Pipeline:
         no place-doc chunk among what was retrieved, no place name match, no Redis
         connector configured for this space, an unrecognized ULB — so the caller falls
         back to the normal chunk-grounded answer rather than the user getting nothing."""
-        all_places: list[PlaceDevices] = []
-        seen_chunk_ids: set[str] = set()
-        for chunk in chunks:
-            if chunk.id in seen_chunk_ids:
-                continue
-            seen_chunk_ids.add(chunk.id)
-            all_places.extend(parse_place_blocks(chunk.code))
-        if not all_places:
-            return None
-        matches = find_matching_places(question, all_places)
+        matches = self._match_places_in_chunks(question, chunks)
         if not matches:
             return None
-        matches = matches[:5]  # a "give me everything" question shouldn't blow up the context/table unboundedly
 
         readings: dict[str, dict | None] = {}
         answerable = []
@@ -653,12 +683,70 @@ class Pipeline:
         )
         return text, table, tool_trace
 
+    def _try_report_answer(
+        self, question: str, space_id: str, chunks: list[CodeChunk], wants_chart: bool = False,
+    ) -> tuple[str, dict | None, dict | None, ReportToolTrace] | None:
+        """Answers a historical-report question (see DecomposeResult.wants_report) from
+        the watco_stream_db aggregate tables instead of the normal chunk-grounded
+        generation — same place/device-doc matching as _try_live_data_answer, but
+        resolves a time WINDOW first (see ReportWindowResolver) and fetches from
+        Postgres instead of Redis. The answer text/table/chart is built directly from
+        the fetched data (see build_report_block) rather than generated by an LLM call:
+        that path was tried first and, even after a compliance-focused prompt and a
+        retry, still unreliably dropped the required block or emitted malformed JSON
+        on a long multi-series chart — confirmed live, repeatedly. Building it in code
+        makes both failure modes structurally impossible instead of merely less likely.
+
+        Returns None for anything that means "can't even attempt a report here" — no
+        place-doc chunk among what was retrieved, no place name match, the time
+        reference couldn't be understood, or no Postgres connector configured for this
+        space — so the caller falls back to the normal chunk-grounded answer. It does
+        NOT return None just because a matched place/device has zero rows in the report
+        tables — that's a real, answerable case ("no report data available for X"),
+        stated honestly by build_report_block instead of the caller silently describing
+        the place's static catalog entry instead."""
+        # See strip_date_phrases's own comment — a report question's date (unlike a
+        # live-data question, which rarely has one) can otherwise false-match an
+        # unrelated place whose name happens to contain the same day-of-month number.
+        matches = self._match_places_in_chunks(strip_date_phrases(question), chunks)
+        if not matches:
+            return None
+
+        window = self.report_window_resolver.resolve(question, date.today())
+        if window is None:
+            return None
+
+        points = [p for place in matches for p in place.points]
+        reports = fetch_report_data(space_id, points, window)
+        if reports is None:
+            return None
+
+        context = build_report_context(matches, window, reports)
+        chart_kind = infer_chart_kind(question)
+        text, table, chart = build_report_block(matches, reports, window, wants_chart, chart_kind)
+        tool_trace = ReportToolTrace(
+            matched_places=[p.place_name for p in matches],
+            metric=window.metric, granularity=window.granularity,
+            start_date=window.start_date.isoformat(), end_date=window.end_date.isoformat(),
+            context=context,
+        )
+        return text, table, chart, tool_trace
+
     @staticmethod
     def _live_data_candidate_chunks(state: _RetrievalState) -> list[CodeChunk]:
-        """See _try_live_data_answer's docstring for why this is more than just
-        final_chunks — the raw hybrid-search candidates carry chunks the wide-fallback
-        file-selection heuristic can lose entirely."""
-        return state.final_chunks + [sc.chunk for sc in state.scored_candidates]
+        """See _try_live_data_answer's/_try_report_answer's docstrings for why this is
+        more than just final_chunks — the raw hybrid-search candidates carry chunks the
+        wide-fallback file-selection heuristic can lose entirely. Shared by both tool
+        paths (live-data and report), not live-data-specific despite the name.
+
+        tool_source_chunks (the top-routed source(s) read whole — see
+        _RetrievalState's comment) goes last and deduped by id: it's the completeness
+        guarantee, not the primary source, so a chunk already present via
+        scored_candidates isn't listed twice."""
+        seen = {c.id for c in state.final_chunks}
+        seen.update(sc.chunk.id for sc in state.scored_candidates)
+        extra = [c for c in state.tool_source_chunks if c.id not in seen]
+        return state.final_chunks + [sc.chunk for sc in state.scored_candidates] + extra
 
     def _retrieve_candidates(
         self, question: str, space_id: str, skip_hybrid_rerank: bool = False, skip_rerank: bool = False
@@ -806,19 +894,21 @@ class Pipeline:
     def _finish_retrieval(
         self, question: str, space_id: str, candidate: _CandidateState, sub_questions: list[str],
         routed_origin: dict[str, str], candidate_origin: dict[str, str],
-        reranked_origin: dict[str, str], started: float, wants_live_data: bool = False,
+        reranked_origin: dict[str, str], started: float,
+        wants_live_data: bool = False, wants_report: bool = False,
     ) -> _RetrievalState:
         """Stages 5-6: broad-intent gate, then compress (or whole-source wide fallback).
         Runs once against the ORIGINAL question and the merged candidate/rerank lists —
         sub-questions exist only to fix retrieval; generation answers what was actually
         asked, not each fragment separately.
 
-        wants_live_data skips the wide-fallback gate entirely (see
-        Pipeline._try_live_data_answer) — a live-data question is a targeted device
+        wants_live_data/wants_report skip the wide-fallback gate entirely (see
+        Pipeline._try_live_data_answer/_try_report_answer) — both are a targeted device
         lookup, never "summarize this source," and file-level routing scores a whole
         source: in a space mixing a small device doc with much larger unrelated
         sources, a razor-thin routing-score gap can send wide-fallback after the wrong
         (huge) source, blowing the token budget for a question that never needed it."""
+        wants_tool_answer = wants_live_data or wants_report
         # Only the top-scoring source(s), not every source with even one weak match —
         # candidate.routed is score-descending, so routed[0] is the best.
         routed_source_ids: list[str] = []
@@ -842,8 +932,29 @@ class Pipeline:
         # Three ways into the wide path, cheapest first — see BroadIntentClassifier's
         # docstring for why the LLM tier only fires on the genuinely ambiguous case.
         route_top_score = candidate.routed[0][2] if candidate.routed else 0.0
-        if wants_live_data:
-            logger.info("  [5/6 compress] live-data question — skipping wide fallback entirely")
+        tool_source_chunks: list[CodeChunk] = []
+        if wants_tool_answer:
+            logger.info("  [5/6 compress] live-data/report question — skipping wide fallback entirely")
+            # See _RetrievalState.tool_source_chunks's comment — read routed source(s)
+            # whole rather than trusting the shared hybrid-search cap to have kept every
+            # chunk of what's typically a small reference doc. Widened past just the
+            # exact-tied-for-top source(s): confirmed live that file-level routing can't
+            # reliably rank one ULB's place/device doc above another's near-identical
+            # sibling (same structure, mostly-shared vocabulary) — e.g. ctc/puri/bbsr
+            # device docs scored within 0.05 of each other, with ctc's actual answer
+            # placed 3rd, not 1st. Bounded by the same token budget the wide-fallback
+            # path already uses, so this can't balloon into reading something large that
+            # merely routed into the top few by coincidence.
+            tool_source_ids = list(dict.fromkeys(source_id for _fp, source_id, _score in candidate.routed))[:3]
+            tool_candidates = self._wide_fallback_chunks(space_id, tool_source_ids)
+            tool_token_estimate = sum(len(c.embeddable_text) for c in tool_candidates) // Tokenizer.CHARS_PER_TOKEN
+            if tool_token_estimate <= self.settings.wide_answer_max_tokens:
+                tool_source_chunks = tool_candidates
+            else:
+                logger.info(
+                    "  [5/6 compress] tool-source whole-read too large (~%d tokens) — "
+                    "falling back to hybrid candidates only", tool_token_estimate,
+                )
         elif not reranked_chunks and route_top_score < self.settings.route_min_top_score:
             # Off-topic, not broad — skip the wide attempt so this reports NO_MATCH
             # instead of a "too large, be more specific" refusal.
@@ -951,6 +1062,7 @@ class Pipeline:
             reranked_origin=reranked_origin,
             timings=timings,
             tokens=tokens,
+            tool_source_chunks=tool_source_chunks,
         )
 
     def _retrieve(
@@ -994,7 +1106,7 @@ class Pipeline:
                 states = [
                     self._retrieve_candidates(
                         sub_questions[0], space_id, skip_hybrid_rerank=decompose_result.is_broad,
-                        skip_rerank=decompose_result.wants_live_data,
+                        skip_rerank=decompose_result.wants_live_data or decompose_result.wants_report,
                     )
                 ]
                 decomposed: list[str] = []
@@ -1075,8 +1187,12 @@ class Pipeline:
             # Pipeline._try_live_data_answer), so "insufficient, retry narrowly" would
             # burn a sufficiency-check call plus a full retry search — tens of seconds —
             # on a question neither step could ever satisfy, since there was never a
-            # chunk-grounded answer to find here in the first place.
-            skip_sufficiency_check = (mode == "single" and decompose_result.is_broad) or decompose_result.wants_live_data
+            # chunk-grounded answer to find here in the first place. Same reasoning
+            # applies to a report question — see Pipeline._try_report_answer.
+            skip_sufficiency_check = (
+                (mode == "single" and decompose_result.is_broad)
+                or decompose_result.wants_live_data or decompose_result.wants_report
+            )
             if not skip_sufficiency_check:
                 for q, s in zip(sub_questions, states):
                     if not s.reranked_scored:
@@ -1161,7 +1277,7 @@ class Pipeline:
             state = self._finish_retrieval(
                 question, space_id, candidate, decomposed,
                 routed_origin, candidate_origin, reranked_origin, started,
-                wants_live_data=decompose_result.wants_live_data,
+                wants_live_data=decompose_result.wants_live_data, wants_report=decompose_result.wants_report,
             )
             state.timings["decompose"] = decompose_ms
             _add_usage(state.tokens, decompose_tokens)
@@ -1178,6 +1294,7 @@ class Pipeline:
             state.is_broad = decompose_result.is_broad
             state.wants_chart = decompose_result.wants_chart
             state.wants_live_data = decompose_result.wants_live_data
+            state.wants_report = decompose_result.wants_report
         except Cancelled:
             logger.warning(
                 "RETRIEVAL CANCELLED after %.1fs | question=%r", time.monotonic() - started, question
@@ -1188,7 +1305,7 @@ class Pipeline:
     def _build_query_trace(
         self, question: str, space_id: str, state: _RetrievalState, answer_trace: AnswerTrace,
         raw_question: str | None, history: list[tuple[str, str]] | None,
-        live_data_tool: LiveDataToolTrace | None = None,
+        live_data_tool: LiveDataToolTrace | None = None, report_tool: ReportToolTrace | None = None,
     ) -> QueryTrace:
         return QueryTrace(
             question=question,
@@ -1221,10 +1338,19 @@ class Pipeline:
             rerank_min_top_score=self.settings.rerank_min_top_score,
             wide_fallback=state.wide_fallback,
             wide_fallback_reason=state.wide_fallback_reason,
-            system_prompt=LIVE_DATA_SYSTEM_PROMPT if live_data_tool else SYSTEM_PROMPT,
+            system_prompt=(
+                LIVE_DATA_SYSTEM_PROMPT if live_data_tool
+                else "(no LLM call — see below)" if report_tool
+                else SYSTEM_PROMPT
+            ),
             final_prompt=(
-                f"{live_data_tool.context}\n\nQuestion: {question}"
-                if live_data_tool
+                f"{live_data_tool.context}\n\nQuestion: {question}" if live_data_tool
+                else (
+                    f"{report_tool.context}\n\n"
+                    "The table/chart/text above is built directly from this fetched data in "
+                    "code, not generated by an LLM call — see Pipeline._try_report_answer / "
+                    "build_report_block."
+                ) if report_tool
                 else self.answer_generator.build_prompt(
                     raw_question or question, state.final_chunks, state.insufficient_sub_questions
                 )
@@ -1240,6 +1366,7 @@ class Pipeline:
             is_broad=state.is_broad,
             wants_chart=state.wants_chart,
             live_data_tool=live_data_tool,
+            report_tool=report_tool,
         )
 
     def query_trace(
@@ -1259,40 +1386,52 @@ class Pipeline:
         # double-counted into state.tokens below on any path that skips attribution.
         self.bulk_llm.last_usage = None
         generate_started = time.monotonic()
+        # `question` (the rewritten standalone form), never raw_question — unlike the
+        # normal chunk-grounded answer call below, which deliberately prefers
+        # raw_question for natural phrasing, this question is used to MATCH a place
+        # by name (see find_matching_places). raw_question can still hold an
+        # unresolved pronoun ("...there") that the rewrite step exists specifically
+        # to resolve; matching against it defeats that resolution entirely.
         live_result = (
-            # `question` (the rewritten standalone form), never raw_question — unlike the
-            # normal chunk-grounded answer call below, which deliberately prefers
-            # raw_question for natural phrasing, this question is used to MATCH a place
-            # by name (see find_matching_places). raw_question can still hold an
-            # unresolved pronoun ("...there") that the rewrite step exists specifically
-            # to resolve; matching against it defeats that resolution entirely.
             self._try_live_data_answer(question, space_id, self._live_data_candidate_chunks(state))
             if state.wants_live_data else None
         )
+        report_result = (
+            self._try_report_answer(question, space_id, self._live_data_candidate_chunks(state), wants_chart=state.wants_chart)
+            if state.wants_report and live_result is None else None
+        )
         live_tool_trace = None
+        report_tool_trace = None
         if live_result is not None:
             live_text, live_table, live_tool_trace = live_result
             answer_trace = AnswerTrace(text=live_text, model=self.settings.llm_model, live_data=True, table=live_table)
+        elif report_result is not None:
+            report_text, report_table, report_chart, report_tool_trace = report_result
+            answer_trace = AnswerTrace(
+                text=report_text, model=self.settings.llm_model, table=report_table, chart=report_chart
+            )
         else:
-            # Live classification fired but no place/device matched (or its ULB has no
-            # connector) — final_chunks is empty because wants_live_data skipped rerank
-            # and wide-fallback, not because nothing relevant was found. Fall back to the
-            # raw hybrid candidates instead of a false NO_MATCH (see
-            # _try_live_data_answer's docstring).
-            if state.wants_live_data and not state.final_chunks:
+            # Live/report classification fired but no place/device matched (or, for
+            # report, the time window couldn't be resolved) — final_chunks is empty
+            # because wants_live_data/wants_report skipped rerank and wide-fallback, not
+            # because nothing relevant was found. Fall back to the raw hybrid candidates
+            # instead of a false NO_MATCH (see _try_live_data_answer's docstring).
+            if (state.wants_live_data or state.wants_report) and not state.final_chunks:
                 state.final_chunks = self._live_data_candidate_chunks(state)
             answer_trace = self._answer_trace(
                 raw_question or question, state.final_chunks, history,
                 empty_message=state.too_large_message, insufficient=state.insufficient_sub_questions,
                 wants_chart=state.wants_chart,
             )
-        if state.final_chunks or live_result is not None:
+        tool_answered = live_result is not None or report_result is not None
+        if state.final_chunks or tool_answered:
             state.timings["generate"] = (time.monotonic() - generate_started) * 1000
             _add_usage(state.tokens, self.llm.last_usage)
             _add_usage(state.tokens, self.bulk_llm.last_usage)
         logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
         return self._build_query_trace(
-            question, space_id, state, answer_trace, raw_question, history, live_data_tool=live_tool_trace
+            question, space_id, state, answer_trace, raw_question, history,
+            live_data_tool=live_tool_trace, report_tool=report_tool_trace,
         )
 
     def query_trace_stream(
@@ -1327,7 +1466,12 @@ class Pipeline:
             self._try_live_data_answer(question, space_id, self._live_data_candidate_chunks(state))
             if state.wants_live_data else None
         )
+        report_result = (
+            self._try_report_answer(question, space_id, self._live_data_candidate_chunks(state), wants_chart=state.wants_chart)
+            if state.wants_report and live_result is None else None
+        )
         live_tool_trace = None
+        report_tool_trace = None
         if live_result is not None:
             live_text, live_table, live_tool_trace = live_result
             generate_started = time.monotonic()
@@ -1336,13 +1480,24 @@ class Pipeline:
             state.timings["generate"] = (time.monotonic() - generate_started) * 1000
             _add_usage(state.tokens, self.llm.last_usage)
             _add_usage(state.tokens, self.bulk_llm.last_usage)
+        elif report_result is not None:
+            report_text, report_table, report_chart, report_tool_trace = report_result
+            generate_started = time.monotonic()
+            yield report_text
+            answer_trace = AnswerTrace(
+                text=report_text, model=self.settings.llm_model, table=report_table, chart=report_chart
+            )
+            state.timings["generate"] = (time.monotonic() - generate_started) * 1000
+            _add_usage(state.tokens, self.llm.last_usage)
+            _add_usage(state.tokens, self.bulk_llm.last_usage)
         else:
-            # Live classification fired but no place/device matched (or its ULB has no
-            # connector) — final_chunks is empty because wants_live_data skipped rerank
-            # and wide-fallback, not because nothing relevant was found. Fall back to the
-            # raw hybrid candidates instead of a false NO_MATCH (see
-            # _try_live_data_answer's docstring, and query_trace()'s matching fallback).
-            if state.wants_live_data and not state.final_chunks:
+            # Live/report classification fired but no place/device matched (or, for
+            # report, the time window couldn't be resolved) — final_chunks is empty
+            # because wants_live_data/wants_report skipped rerank and wide-fallback, not
+            # because nothing relevant was found. Fall back to the raw hybrid candidates
+            # instead of a false NO_MATCH (see _try_live_data_answer's docstring, and
+            # query_trace()'s matching fallback).
+            if (state.wants_live_data or state.wants_report) and not state.final_chunks:
                 state.final_chunks = self._live_data_candidate_chunks(state)
             if not state.final_chunks:
                 text = state.too_large_message or self.NO_MATCH
@@ -1350,7 +1505,7 @@ class Pipeline:
                 answer_trace = AnswerTrace(text=text, model=self.settings.llm_model)
                 logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
                 return self._build_query_trace(question, space_id, state, answer_trace, raw_question, history)
-            check()  # live_tool_trace stays None on this fallback path — no tool call to show
+            check()  # live/report tool traces stay None on this fallback path — no tool call to show
             self.llm.last_usage = None
             # See query_trace()'s matching reset — without it a stale bulk_llm usage
             # from an earlier stage would double-count into state.tokens below on the
@@ -1383,7 +1538,8 @@ class Pipeline:
 
         logger.info("RETRIEVAL DONE in %.1fs", time.monotonic() - started)
         return self._build_query_trace(
-            question, space_id, state, answer_trace, raw_question, history, live_data_tool=live_tool_trace
+            question, space_id, state, answer_trace, raw_question, history,
+            live_data_tool=live_tool_trace, report_tool=report_tool_trace,
         )
 
     def vectors_trace(self, question: str, space_id: str) -> VectorsTrace:

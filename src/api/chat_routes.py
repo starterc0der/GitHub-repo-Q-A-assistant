@@ -426,8 +426,11 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
     # under the exact question text would serve a stale reading forever on any repeat of
     # the same wording, since the cache has no way to know the underlying data changed
     # since. Skip lookup too, not just the write: an entry cached before this guard
-    # existed (or an old build) must not keep getting served.
-    if not history and not route.wants_live_data:
+    # existed (or an old build) must not keep getting served. A report question is
+    # skipped for the same reason — even a "yesterday" window can touch a still-filling
+    # daily/hourly/5min row (see ReportWindowResolver), so it's simplest to never cache
+    # rather than track whether a given window happens to be fully closed.
+    if not history and not route.wants_live_data and not route.wants_report:
         cache_started = time.monotonic()
         cached = _cache_lookup(space_id, raw_question)
         cache_ms = (time.monotonic() - cache_started) * 1000
@@ -481,7 +484,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
         table=json.dumps(table) if table else None,
     )
 
-    if not history and not route.wants_live_data:
+    if not history and not route.wants_live_data and not route.wants_report:
         _cache_put(space_id, raw_question, assistant_id)
     _set_title_if_new(chat_id, raw_question)
     _touch_chat(chat_id)

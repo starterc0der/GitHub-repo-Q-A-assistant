@@ -163,6 +163,22 @@ class LiveDataToolTrace:
 
 
 @dataclass
+class ReportToolTrace:
+    """What Pipeline._try_report_answer actually did before generation — the "tool
+    call" in the pipeline breakdown for a historical-report question. `context` is the
+    exact narrated block (per-sub-place, per-metric fetched values or "no report data
+    available") that was prepended to the question and sent to the LLM (see
+    reports.build_report_context)."""
+
+    matched_places: list[str]
+    metric: str
+    granularity: str
+    start_date: str
+    end_date: str
+    context: str
+
+
+@dataclass
 class AnswerTrace:
     """The final generation step. Unlike every other stage this one actually calls the
     answer LLM, so a query trace costs one main-model call on top of the compression calls."""
@@ -248,6 +264,11 @@ class QueryTrace:
     # live-data system prompt and context+question on this path, not the normal
     # chunk-grounded template (which would show zero chunks and be misleading).
     live_data_tool: LiveDataToolTrace | None = None
+    # Same idea as live_data_tool above, for a historical-report question instead of a
+    # live Redis read — see Pipeline._try_report_answer / ReportToolTrace. At most one
+    # of live_data_tool/report_tool is ever set (LIVE and REPORT are mutually exclusive
+    # in the router grammar).
+    report_tool: ReportToolTrace | None = None
 
 
 @dataclass

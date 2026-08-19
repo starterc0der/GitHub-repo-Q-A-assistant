@@ -11,6 +11,7 @@ META_MARKER = "META"
 FLAG_BROAD = "BROAD"
 FLAG_CHART = "CHART"
 FLAG_LIVE = "LIVE"
+FLAG_REPORT = "REPORT"
 MAX_HOPS = 3  # caps latency/cost the same way the retry pass caps itself at one attempt
 
 # Shared by both QueryDecomposer (turn 1, no history) and StandaloneRewriter (turn 2+,
@@ -21,13 +22,20 @@ MAX_HOPS = 3  # caps latency/cost the same way the retry pass caps itself at one
 ROUTE_GRAMMAR = (
     "Line 1: space-separated flags from {broad} (needs a wide summary/overview across "
     "much of the source, not one specific fact), {chart} (asks for a comparison, graph, "
-    "or chart), and {live} (asks for a CURRENT/LIVE reading — pressure, flow, or how "
-    "much water has been loaded/consumed — at a named place, as opposed to a static fact "
-    "about that place). Any question using the word \"data\" together with a specific "
-    "place/device/zone (e.g. \"what is the data in zone 8\", \"show me data for X\") is "
-    "always {live} — it means the live sensor reading, never the catalog/mapping entry. "
-    "{live} and {chart} are not exclusive — a request to COMPARE live "
-    "readings across places (e.g. \"compare the pressure at X and Y\") is both {live} "
+    "or chart), {live} (asks for a CURRENT/LIVE reading — pressure, flow, or how much "
+    "water has been loaded/consumed RIGHT NOW — at a named place, as opposed to a static "
+    "fact about that place), and {report} (asks for a HISTORICAL/aggregated reading over "
+    "some past time window — a report, an average, a total, a trend — for pressure, "
+    "flow, or totalizer at a named place, e.g. \"pressure report for yesterday\", "
+    "\"flow trend last week\", \"totalizer for last month\", \"data for X in the last 10 "
+    "minutes\"). {live} and {report} are mutually exclusive — a bare \"right now\"/\"current\" "
+    "reading is {live}; anything naming a past day, week, month, or a duration back from "
+    "now (\"last 10 minutes\", \"last 3 hours\") is {report}, never {live}. Any question "
+    "using the word \"data\" together with a specific place/device/zone with NO time "
+    "window named (e.g. \"what is the data in zone 8\") is {live} — it means the current "
+    "sensor reading, never the catalog/mapping entry. {live}/{report} and {chart} are not "
+    "exclusive — a request to COMPARE readings across places (e.g. \"compare the pressure "
+    "at X and Y\", \"compare last week's flow at X and Y\") is {live} {chart} or {report} "
     "{chart} together, not {chart} alone. Write NONE if none apply.\n"
     "Line 2: {single} if it is genuinely one question; {parallel} if it is multiple "
     "INDEPENDENT questions (different topics joined by \"and\", or a list of separate "
@@ -35,12 +43,12 @@ ROUTE_GRAMMAR = (
     "later part REQUIRES the answer to an earlier part first — you could not even search "
     "for it without already knowing that answer (e.g. \"which department had the most "
     "failures, and what policy caused them?\" — you can't search for the policy until you "
-    "know which department). A {live} question naming several places or devices (e.g. "
-    "\"data for X and Y\", \"compare X and Y\") is still {single}, never {parallel} — "
-    "looking up each one's live reading together is one lookup, not independent "
+    "know which department). A {live} or {report} question naming several places or "
+    "devices (e.g. \"data for X and Y\", \"compare X and Y\") is still {single}, never "
+    "{parallel} — looking up each one's reading together is one lookup, not independent "
     "sub-questions."
 ).format(
-    broad=FLAG_BROAD, chart=FLAG_CHART, live=FLAG_LIVE,
+    broad=FLAG_BROAD, chart=FLAG_CHART, live=FLAG_LIVE, report=FLAG_REPORT,
     single=SINGLE_SENTINEL, parallel=PARALLEL_MARKER, sequential=SEQUENTIAL_MARKER,
 )
 
@@ -65,18 +73,20 @@ DECOMPOSE_SYSTEM_PROMPT = (
 )
 
 
-def parse_route_header(lines: list[str]) -> tuple[bool, bool, bool, str, list[str]]:
+def parse_route_header(lines: list[str]) -> tuple[bool, bool, bool, bool, str, list[str]]:
     """Parses the shared flags-line + mode-line header (see ROUTE_GRAMMAR) — returns
-    (is_broad, wants_chart, wants_live_data, mode, remaining lines after the header).
-    Shared by QueryDecomposer and StandaloneRewriter so both interpret the same grammar
-    identically; each caller still owns what the remaining lines mean for SINGLE mode."""
+    (is_broad, wants_chart, wants_live_data, wants_report, mode, remaining lines after the
+    header). Shared by QueryDecomposer and StandaloneRewriter so both interpret the same
+    grammar identically; each caller still owns what the remaining lines mean for SINGLE
+    mode."""
     if not lines:
-        return False, False, False, SINGLE_SENTINEL, []
+        return False, False, False, False, SINGLE_SENTINEL, []
     flags = set(lines[0].strip().upper().split())
-    is_broad, wants_chart, wants_live_data = FLAG_BROAD in flags, FLAG_CHART in flags, FLAG_LIVE in flags
+    is_broad, wants_chart = FLAG_BROAD in flags, FLAG_CHART in flags
+    wants_live_data, wants_report = FLAG_LIVE in flags, FLAG_REPORT in flags
     if len(lines) < 2:
-        return is_broad, wants_chart, wants_live_data, SINGLE_SENTINEL, []
-    return is_broad, wants_chart, wants_live_data, lines[1].strip().upper(), lines[2:]
+        return is_broad, wants_chart, wants_live_data, wants_report, SINGLE_SENTINEL, []
+    return is_broad, wants_chart, wants_live_data, wants_report, lines[1].strip().upper(), lines[2:]
 
 
 @dataclass
@@ -87,6 +97,7 @@ class DecomposeResult:
     is_broad: bool = False
     wants_chart: bool = False
     wants_live_data: bool = False
+    wants_report: bool = False
 
 
 HOP_RESOLVE_SYSTEM_PROMPT = (
@@ -160,21 +171,24 @@ class QueryDecomposer:
         if lines[0].strip().upper() == META_MARKER:
             return DecomposeResult("single", [question], is_meta=True)
 
-        is_broad, wants_chart, wants_live_data, mode, rest = parse_route_header(lines)
+        is_broad, wants_chart, wants_live_data, wants_report, mode, rest = parse_route_header(lines)
         if mode == SEQUENTIAL_MARKER:
             hops = rest[:MAX_HOPS]
             if len(hops) > 1:
                 return DecomposeResult(
-                    "sequential", hops, is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+                    "sequential", hops, is_broad=is_broad, wants_chart=wants_chart,
+                    wants_live_data=wants_live_data, wants_report=wants_report,
                 )
         elif mode == PARALLEL_MARKER:
             parts = rest[: self.max_subquestions]
             if len(parts) > 1:
                 return DecomposeResult(
-                    "parallel", parts, is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+                    "parallel", parts, is_broad=is_broad, wants_chart=wants_chart,
+                    wants_live_data=wants_live_data, wants_report=wants_report,
                 )
         return DecomposeResult(
-            "single", [question], is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+            "single", [question], is_broad=is_broad, wants_chart=wants_chart,
+            wants_live_data=wants_live_data, wants_report=wants_report,
         )
 
     def resolve_hop(self, input_question: str, input_context: str, template: str, placeholder: str) -> str:

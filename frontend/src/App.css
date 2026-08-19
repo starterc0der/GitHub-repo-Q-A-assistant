@@ -626,6 +626,12 @@
 /* Many-category horizontal charts grow taller than they should sit inline — cap the
    height and let the chart scroll internally instead of ballooning the message bubble. */
 .rag-chart__scroll { max-height: 280px; overflow-y: auto; }
+/* TrendChart grows its SVG wider than the bubble for a large category count (see
+   TrendChart.jsx's WIDTH calc) — only that case needs the SVG at its natural pixel
+   width instead of the usual 100%-fill; the default (small/no scroll) chart still fills
+   its bubble normally. */
+.rag-chart__hscroll { max-width: 100%; overflow-x: auto; }
+.rag-chart__hscroll .rag-chart__svg { width: auto; max-width: none; }
 .rag-chart__axis { stroke: var(--border-strong); stroke-width: 1; }
 .rag-chart__value { font-size: 9px; fill: var(--ink-dim); }
 .rag-bubble--user .rag-chart__value { fill: white; opacity: 0.9; }

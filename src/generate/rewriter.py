@@ -78,22 +78,25 @@ class StandaloneRewriter:
         if lines[0].strip().upper() == META_MARKER:
             return DecomposeResult("single", [question], is_meta=True)
 
-        is_broad, wants_chart, wants_live_data, mode, rest = parse_route_header(lines)
+        is_broad, wants_chart, wants_live_data, wants_report, mode, rest = parse_route_header(lines)
         if mode == SEQUENTIAL_MARKER:
             hops = rest[:MAX_HOPS]
             if len(hops) > 1:
                 return DecomposeResult(
-                    "sequential", hops, is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+                    "sequential", hops, is_broad=is_broad, wants_chart=wants_chart,
+                    wants_live_data=wants_live_data, wants_report=wants_report,
                 )
         elif mode == PARALLEL_MARKER:
             parts = rest[: self.max_subquestions]
             if len(parts) > 1:
                 return DecomposeResult(
-                    "parallel", parts, is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+                    "parallel", parts, is_broad=is_broad, wants_chart=wants_chart,
+                    wants_live_data=wants_live_data, wants_report=wants_report,
                 )
         # SINGLE (or anything unrecognized): one more line — the rewritten standalone
         # question — falls back to the raw question if the model omitted it.
         standalone = rest[0] if rest else question
         return DecomposeResult(
-            "single", [standalone], is_broad=is_broad, wants_chart=wants_chart, wants_live_data=wants_live_data
+            "single", [standalone], is_broad=is_broad, wants_chart=wants_chart,
+            wants_live_data=wants_live_data, wants_report=wants_report,
         )

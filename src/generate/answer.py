@@ -56,10 +56,12 @@ class ChartParser:
         match = CHART_PATTERN.search(text)
         if not match:
             return text, None
-        chart = self._validate(match.group(1))
-        if chart is None:
-            return text, None
-        return (text[: match.start()] + text[match.end() :]).strip(), chart
+        # Strip the fenced block whether or not it parsed — a malformed block is still
+        # the model's ATTEMPT at a chart, not prose meant to be read; leaving it in means
+        # the user sees raw broken JSON instead of "no chart", which is what the class
+        # docstring already promises.
+        stripped = (text[: match.start()] + text[match.end() :]).strip()
+        return stripped, self._validate(match.group(1))
 
     def _validate(self, raw: str) -> dict | None:
         try:
@@ -85,8 +87,13 @@ class ChartParser:
                 return None
             cleaned_series.append({"name": s["name"], "values": [float(v) for v in values]})
         title = data.get("title")
+        # "bar" (default) for a categorical snapshot comparison; "trend" for a
+        # time-series — same shape either way (categories are the time buckets for a
+        # trend), only the frontend rendering differs. See TrendChart.jsx.
+        kind = data.get("kind")
         return {
             "title": title if isinstance(title, str) else "",
+            "kind": kind if kind in ("bar", "trend") else "bar",
             "categories": [str(c) for c in categories],
             "series": cleaned_series,
         }

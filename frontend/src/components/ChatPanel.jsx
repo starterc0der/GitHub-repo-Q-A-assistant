@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createChat, deleteChat, listChats, listMessages, sendMessage } from "../api.js";
 import { cls, ConfirmDialog } from "./RagAtoms.jsx";
 import { BarChart } from "./BarChart.jsx";
+import { TrendChart } from "./TrendChart.jsx";
 import { DataTable } from "./DataTable.jsx";
 
 // **bold** and `code` spans only — not a full markdown parser, just the two things the
@@ -69,7 +70,7 @@ function MessageBubble({ message }) {
   return (
     <div className={cls("rag-bubble", isUser ? "rag-bubble--user" : "rag-bubble--assistant")}>
       <MessageText text={message.content} />
-      {message.chart && <BarChart chart={message.chart} />}
+      {message.chart && (message.chart.kind === "trend" ? <TrendChart chart={message.chart} /> : <BarChart chart={message.chart} />)}
       {message.table && <DataTable table={message.table} />}
     </div>
   );

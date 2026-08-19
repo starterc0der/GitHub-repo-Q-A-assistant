@@ -60,6 +60,53 @@ def test_find_matching_places_matches_on_place_name() -> None:
     assert [p.place_name for p in matches] == ["Zone_11_Gorakabar"]
 
 
+def test_find_matching_places_matches_a_single_word_place_name_exactly() -> None:
+    # A one-token place name (e.g. a real BBSR/Puri place like "Acharyavihar") scores
+    # only 1 on token overlap — the same as a generic noise word like "zone" — but
+    # unlike "zone", it's the ENTIRE name, so it must still match, not get filtered as noise.
+    text = "## Acharyavihar\nULB: bhubaneswar\nInlet: device_id=AA-BB, pid=1, location=ESR\n"
+    places = parse_place_blocks(text)
+
+    matches = find_matching_places("what is the pressure at Acharyavihar", places)
+
+    assert [p.place_name for p in matches] == ["Acharyavihar"]
+
+
+def test_find_matching_places_does_not_strong_match_on_a_shared_generic_location() -> None:
+    # Regression: "ESR" is a single-token SUB-PLACE location shared by nearly every
+    # place's inlet in this dataset — unlike a single-token PLACE name (see the test
+    # above), it must NOT get the full-subset-match strong-score exemption, or a
+    # question merely containing the word "ESR" (e.g. quoting "ESR (inlet)" back from a
+    # prior answer) would strong-match almost the entire corpus.
+    text = (
+        "## Zone_08_Krushak_Bazar\nULB: cuttack\nInlet: device_id=00-00-54-5F-05-FC, pid=1, location=ESR\n"
+        "## Zone_09_Sewerage_Store\nULB: cuttack\nInlet: device_id=A8-74-1D-10-F0-EB, pid=2, location=ESR\n"
+    )
+    places = parse_place_blocks(text)
+
+    matches = find_matching_places("show ESR (inlet) for Zone_08_Krushak_Bazar", places)
+
+    assert [p.place_name for p in matches] == ["Zone_08_Krushak_Bazar"]
+
+
+def test_find_matching_places_ignores_stopwords_in_overlap_scoring() -> None:
+    # Regression: a real BBSR sub-place named "Road_6_to_Road_8" false-matched an
+    # unrelated question about "Zone 08" purely because "to" (a boilerplate connector
+    # word, present in both) plus a coincidental "8" digit together crossed the
+    # score>=2 threshold — neither alone would have. Stopwords like "to" must never
+    # count toward the overlap score at all.
+    text = (
+        "## Unrelated_Place\nULB: bhubaneswar\nInlet: device_id=AA-11-22-33-44-55, "
+        "pid=1, location=UGR-1\n"
+        "- device_id=AA-11-22-33-44-55, pid=2, sub_place=Road_6_to_Road_8\n"
+    )
+    places = parse_place_blocks(text)
+
+    matches = find_matching_places("what is the pressure at Zone 08 from august 5 to august 10", places)
+
+    assert matches == []
+
+
 def test_find_matching_places_matches_on_sub_place_name() -> None:
     places = parse_place_blocks(SAMPLE_TEXT)
 
@@ -119,7 +166,8 @@ def test_extract_table_returns_none_for_malformed_json() -> None:
 
     remaining, table = extract_table(text)
 
-    assert remaining == text
+    # stripped, not left showing broken JSON — see TableParser.extract's comment.
+    assert remaining == ""
     assert table is None
 
 

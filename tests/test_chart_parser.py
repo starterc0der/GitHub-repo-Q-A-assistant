@@ -25,6 +25,7 @@ def test_extract_parses_a_valid_chart_and_strips_it_from_the_text() -> None:
     assert "iPhone 16 has 48MP" in stripped
     assert chart == {
         "title": "Camera",
+        "kind": "bar",
         "categories": ["Main"],
         "series": [
             {"name": "iPhone 16", "values": [48.0]},
@@ -33,13 +34,28 @@ def test_extract_parses_a_valid_chart_and_strips_it_from_the_text() -> None:
     }
 
 
+def test_extract_parses_an_explicit_trend_kind() -> None:
+    text = (
+        "```chart\n"
+        '{"title": "Pressure", "kind": "trend", "categories": ["Mon", "Tue"], '
+        '"series": [{"name": "Zone 8", "values": [3.1, 3.4]}]}\n'
+        "```"
+    )
+
+    _stripped, chart = ChartParser().extract(text)
+
+    assert chart["kind"] == "trend"
+
+
 def test_extract_rejects_malformed_json() -> None:
     text = "answer\n```chart\nnot valid json {{{\n```"
 
     stripped, chart = ChartParser().extract(text)
 
     assert chart is None
-    assert stripped == text  # left untouched — nothing safely parsed to strip
+    # stripped, not left showing broken JSON — the fence was still the model's ATTEMPT
+    # at a chart, not prose worth keeping visible.
+    assert stripped == "answer"
 
 
 def test_extract_rejects_mismatched_value_and_category_lengths() -> None:
