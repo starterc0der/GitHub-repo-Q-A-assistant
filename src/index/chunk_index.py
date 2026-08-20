@@ -81,6 +81,15 @@ class ChunkIndex:
         )
         return [self._to_chunk(record) for record in records]
 
+    def peek_source(self, space_id: str, source_id: str, limit: int) -> list[CodeChunk]:
+        """A cheap, bounded sample of one source's chunks — for classifying what a source
+        IS (e.g. "does this parse as a place doc?") without paying to read a large,
+        irrelevant source in full just to rule it out."""
+        records = self.store.scroll(
+            COLLECTION_NAME, query_filter=self._filter(space_id, source_id=source_id), limit=limit
+        )
+        return [self._to_chunk(record) for record in records]
+
     def fetch_by_ids(self, chunk_ids: list[str]) -> list[CodeChunk]:
         """Rehydrate chunk bodies by their stable point id — used to redisplay a stored
         trace without re-embedding or re-storing the chunk body per message."""

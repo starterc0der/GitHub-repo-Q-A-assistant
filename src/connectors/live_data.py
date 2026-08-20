@@ -14,6 +14,8 @@ from src.db import connect
 # used for that ULB's devices. One entry per city as it comes online.
 ULB_REDIS_PREFIX = {
     "cuttack": "ctc",
+    "bhubaneswar": "bbsr",
+    "puri": "puri",
 }
 
 # The model sometimes writes ```json out of habit despite rule 1 below spelling out
@@ -235,6 +237,15 @@ def find_matching_places(question: str, places: list[PlaceDevices]) -> list[Plac
 
 def redis_prefix_for_ulb(ulb: str) -> str | None:
     return ULB_REDIS_PREFIX.get(ulb.strip().lower())
+
+
+def list_space_source_ids(space_id: str) -> list[str]:
+    """Every source in the space, regardless of what file routing thinks is relevant —
+    used by tool-answer place matching, which classifies sources by content instead of
+    trusting routing (see Pipeline._finish_retrieval's wants_tool_answer branch)."""
+    with connect(settings.db_path) as conn:
+        rows = conn.execute("SELECT id FROM sources WHERE space_id=?", (space_id,)).fetchall()
+    return [row[0] for row in rows]
 
 
 def _space_redis_connector(space_id: str) -> dict | None:

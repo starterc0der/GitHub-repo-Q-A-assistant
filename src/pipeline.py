@@ -21,6 +21,7 @@ from src.connectors.live_data import (
     extract_table,
     fetch_live_readings,
     find_matching_places,
+    list_space_source_ids,
     parse_place_blocks,
 )
 from src.connectors.reports import (
@@ -157,14 +158,12 @@ class _RetrievalState:
     wants_chart: bool = False
     wants_live_data: bool = False
     wants_report: bool = False
-    # Every chunk of the top-routed source(s), fetched whole — only populated for a
-    # live-data/report question (see _finish_retrieval). scored_candidates is capped at
-    # hybrid_candidate_k shared across every routed source in the space; a small
-    # reference doc (a place/device list) can lose chunks to that cap once it's sharing
-    # the space with enough competing content, silently dropping some of its places from
-    # what _try_live_data_answer/_try_report_answer ever see. These docs are cheap to
-    # read in full (a handful of chunks), so for a tool-answer question there's no
-    # reason to rely on the cap being generous enough — see _live_data_candidate_chunks.
+    # Every chunk of every source that content-classifies as a place/device doc, fetched
+    # whole — only populated for a live-data/report question (see _finish_retrieval).
+    # Deliberately bypasses file routing and the shared hybrid_candidate_k cap: both are
+    # similarity-based and neither reliably surfaces a small device-catalog doc sharing
+    # the space with a much larger, differently-domained corpus — see _finish_retrieval's
+    # wants_tool_answer branch for how sources get classified instead.
     tool_source_chunks: list[CodeChunk] = field(default_factory=list)
 
 
@@ -935,26 +934,32 @@ class Pipeline:
         tool_source_chunks: list[CodeChunk] = []
         if wants_tool_answer:
             logger.info("  [5/6 compress] live-data/report question — skipping wide fallback entirely")
-            # See _RetrievalState.tool_source_chunks's comment — read routed source(s)
-            # whole rather than trusting the shared hybrid-search cap to have kept every
-            # chunk of what's typically a small reference doc. Widened past just the
-            # exact-tied-for-top source(s): confirmed live that file-level routing can't
-            # reliably rank one ULB's place/device doc above another's near-identical
-            # sibling (same structure, mostly-shared vocabulary) — e.g. ctc/puri/bbsr
-            # device docs scored within 0.05 of each other, with ctc's actual answer
-            # placed 3rd, not 1st. Bounded by the same token budget the wide-fallback
-            # path already uses, so this can't balloon into reading something large that
-            # merely routed into the top few by coincidence.
-            tool_source_ids = list(dict.fromkeys(source_id for _fp, source_id, _score in candidate.routed))[:3]
-            tool_candidates = self._wide_fallback_chunks(space_id, tool_source_ids)
-            tool_token_estimate = sum(len(c.embeddable_text) for c in tool_candidates) // Tokenizer.CHARS_PER_TOKEN
-            if tool_token_estimate <= self.settings.wide_answer_max_tokens:
-                tool_source_chunks = tool_candidates
-            else:
-                logger.info(
-                    "  [5/6 compress] tool-source whole-read too large (~%d tokens) — "
-                    "falling back to hybrid candidates only", tool_token_estimate,
-                )
+            # File-level routing (DocIndex.search_scored) is dense-embedding-only — no
+            # lexical/BM25 signal — so a short, structured device-catalog doc routinely
+            # loses to hundreds of unrelated prose pages in a mixed corpus: confirmed
+            # live, "puri device data" missed the top-8 routed files outright on every
+            # phrasing tried, and "ctc device data" missed them whenever the question
+            # didn't happen to also name "Cuttack". Tool-answer place matching only
+            # needs a handful of small, deterministically-identifiable device-catalog
+            # sources, so this bypasses routing entirely for this path: peek at each
+            # source's first few chunks (cheap even for a 217-page PDF — one bounded
+            # fetch, not the whole source) and keep only the ones that actually parse as
+            # a place doc, rather than trusting a similarity score to have found them.
+            tool_token_estimate = 0
+            for source_id in list_space_source_ids(space_id):
+                preview = self.chunk_index.peek_source(space_id, source_id, limit=3)
+                if not parse_place_blocks("\n".join(c.code for c in preview)):
+                    continue
+                source_chunks = self._wide_fallback_chunks(space_id, [source_id])
+                source_tokens = sum(len(c.embeddable_text) for c in source_chunks) // Tokenizer.CHARS_PER_TOKEN
+                if tool_token_estimate + source_tokens > self.settings.wide_answer_max_tokens:
+                    logger.info(
+                        "  [5/6 compress] tool-source %s too large (~%d tokens) — skipping it, "
+                        "keeping other tool sources", source_id, source_tokens,
+                    )
+                    continue
+                tool_source_chunks.extend(source_chunks)
+                tool_token_estimate += source_tokens
         elif not reranked_chunks and route_top_score < self.settings.route_min_top_score:
             # Off-topic, not broad — skip the wide attempt so this reports NO_MATCH
             # instead of a "too large, be more specific" refusal.

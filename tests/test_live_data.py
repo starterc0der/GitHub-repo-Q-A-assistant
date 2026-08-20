@@ -140,7 +140,9 @@ def test_find_matching_places_returns_empty_list_when_nothing_overlaps() -> None
 def test_redis_prefix_for_ulb_known_and_unknown() -> None:
     assert redis_prefix_for_ulb("cuttack") == "ctc"
     assert redis_prefix_for_ulb("Cuttack") == "ctc"  # case-insensitive
-    assert redis_prefix_for_ulb("bhubaneswar") is None  # not onboarded yet
+    assert redis_prefix_for_ulb("bhubaneswar") == "bbsr"
+    assert redis_prefix_for_ulb("puri") == "puri"
+    assert redis_prefix_for_ulb("nimapada") is None  # not onboarded yet
 
 
 def test_extract_table_parses_a_valid_table_block() -> None:
