@@ -9,10 +9,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from src.api.auth_routes import router as auth_router
 from src.api.chat_routes import router as chat_router
 from src.api.connector_routes import router as connector_router
 from src.api.insights_routes import router as insights_router
 from src.api.routes import pipeline, router
+from src.api.user_routes import router as user_router
 from src.config import settings
 
 # uvicorn only configures its own loggers; without this the app's logger.info() calls
@@ -49,7 +51,10 @@ app.add_middleware(
     allow_origins=[ALLOWED_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,  # required for the browser to send/keep the login cookie
 )
+app.include_router(auth_router)
+app.include_router(user_router)
 app.include_router(router)
 app.include_router(chat_router)
 app.include_router(insights_router)
@@ -67,5 +72,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     response = JSONResponse(status_code=500, content={"detail": str(exc)})
     if request.headers.get("origin") == ALLOWED_ORIGIN:
         response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+        response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Vary"] = "Origin"
     return response

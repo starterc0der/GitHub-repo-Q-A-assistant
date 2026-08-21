@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from src.api.routes import _space_row
+from src.auth import require_admin
 from src.config import settings
 from src.connectors.testing import test_postgres, test_redis
 from src.crypto import decrypt, encrypt
 from src.db import connect, new_id, now
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 # Public row shape never includes encrypted_password or any plaintext credential —
 # every SELECT below names its columns explicitly rather than using SELECT *, so a

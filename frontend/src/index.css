@@ -1,48 +1,48 @@
 :root {
-  --bg: oklch(98% 0.004 95);
-  --panel: oklch(100% 0 0);
-  --panel-2: oklch(96.5% 0.006 95);
-  --ink: oklch(23% 0.02 270);
-  --ink-dim: oklch(48% 0.02 270);
-  --ink-faint: oklch(62% 0.015 270);
-  --border: oklch(90% 0.006 95);
-  --border-strong: oklch(84% 0.008 95);
+  --bg: oklch(97% 0.006 75);
+  --panel: oklch(99% 0.003 75);
+  --panel-2: oklch(94.5% 0.008 75);
+  --ink: oklch(24% 0.015 75);
+  --ink-dim: oklch(46% 0.015 75);
+  --ink-faint: oklch(62% 0.012 75);
+  --border: oklch(89% 0.008 75);
+  --border-strong: oklch(82% 0.01 75);
 
-  --accent: oklch(62% 0.17 18);
-  --accent-ink: oklch(40% 0.15 18);
-  --accent-soft: oklch(93% 0.04 18);
-  --accent-border: oklch(81% 0.07 18);
+  --accent: oklch(62% 0.14 55);
+  --accent-ink: oklch(42% 0.12 55);
+  --accent-soft: oklch(93% 0.035 55);
+  --accent-border: oklch(80% 0.06 55);
 
-  --accent2: oklch(60% 0.13 165);
-  --accent2-ink: oklch(32% 0.1 165);
-  --accent2-soft: oklch(94% 0.035 165);
-  --accent2-border: oklch(80% 0.06 165);
+  --accent2: oklch(62% 0.14 165);
+  --accent2-ink: oklch(40% 0.11 165);
+  --accent2-soft: oklch(93% 0.03 165);
+  --accent2-border: oklch(80% 0.05 165);
 
-  --doc: oklch(58% 0.14 235);
-  --doc-ink: oklch(35% 0.12 235);
-  --doc-soft: oklch(94% 0.03 235);
-  --doc-border: oklch(80% 0.07 235);
+  --doc: oklch(60% 0.13 255);
+  --doc-ink: oklch(42% 0.12 255);
+  --doc-soft: oklch(93% 0.03 255);
+  --doc-border: oklch(80% 0.06 255);
 
-  --warn: oklch(68% 0.15 70);
-  --warn-ink: oklch(40% 0.12 70);
-  --warn-soft: oklch(95% 0.05 70);
-  --warn-border: oklch(84% 0.09 70);
+  --warn: oklch(58% 0.16 25);
+  --warn-ink: oklch(40% 0.14 25);
+  --warn-soft: oklch(94% 0.04 25);
+  --warn-border: oklch(82% 0.08 25);
 
-  --code-bg: oklch(97% 0.012 90);
+  --code-bg: oklch(96% 0.01 75);
 
   /* Dark sidebar surface — a warm charcoal "island" within the otherwise light app,
      matching the space chat sidebar in the updated design. */
-  --sidebar-bg: oklch(29% 0.015 60);
-  --sidebar-border: oklch(36% 0.015 60);
-  --sidebar-btn-bg: oklch(33% 0.018 60);
-  --sidebar-btn-border: oklch(41% 0.015 60);
-  --sidebar-ink: oklch(90% 0.01 290);
-  --sidebar-ink-dim: oklch(58% 0.02 290);
-  --sidebar-ink-faint: oklch(45% 0.02 290);
-  --sidebar-active: oklch(46% 0.17 18);
+  --sidebar-bg: oklch(24% 0.014 55);
+  --sidebar-border: oklch(31% 0.014 55);
+  --sidebar-btn-bg: oklch(29% 0.016 55);
+  --sidebar-btn-border: oklch(34% 0.015 55);
+  --sidebar-ink: oklch(92% 0.008 75);
+  --sidebar-ink-dim: oklch(65% 0.012 75);
+  --sidebar-ink-faint: oklch(48% 0.012 75);
+  --sidebar-active: oklch(46% 0.15 55);
 
-  --sans: "Public Sans", system-ui, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --sans: "Manrope", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }

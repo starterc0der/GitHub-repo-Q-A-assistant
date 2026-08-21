@@ -9,13 +9,14 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 from src.api.routes import _space_row, pipeline
+from src.auth import assert_space_access, current_user
 from src.cancellation import Cancelled, reset_canceller, set_canceller
 from src.config import settings
 from src.db import connect, new_id, now
@@ -127,6 +128,7 @@ def _load_history(chat_id: str, turns: int) -> list[tuple[str, str]]:
 
 def _insert_message(
     chat_id: str, role: str, content: str, *,
+    user_id: str | None = None,
     standalone_question: str | None = None,
     cache_hit: bool = False,
     cached_from: str | None = None,
@@ -142,12 +144,12 @@ def _insert_message(
         conn.execute(
             "INSERT INTO messages "
             "(id, chat_id, seq, role, content, standalone_question, cache_hit, cached_from, "
-            "cache_kind, cache_match_question, cache_match_score, trace, chart, table_data, created_at) "
-            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
+            "cache_kind, cache_match_question, cache_match_score, trace, chart, table_data, user_id, created_at) "
+            "SELECT ?, ?, COALESCE(MAX(seq), -1) + 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM messages WHERE chat_id=?",
             (
                 message_id, chat_id, role, content, standalone_question,
                 int(cache_hit), cached_from, cache_kind, cache_match_question, cache_match_score,
-                trace, chart, table, now(), chat_id,
+                trace, chart, table, user_id, now(), chat_id,
             ),
         )
     return message_id
@@ -235,8 +237,11 @@ class SendMessageRequest(BaseModel):
 
 
 @router.post("/spaces/{space_id}/chats")
-def create_chat(space_id: str, request: CreateChatRequest = CreateChatRequest()) -> dict[str, object]:
+def create_chat(
+    space_id: str, request: CreateChatRequest = CreateChatRequest(), user: dict = Depends(current_user)
+) -> dict[str, object]:
     _space_row(space_id)
+    assert_space_access(space_id, user)
     chat_id = new_id()
     with connect(settings.db_path) as conn:
         conn.execute(
@@ -247,8 +252,9 @@ def create_chat(space_id: str, request: CreateChatRequest = CreateChatRequest())
 
 
 @router.get("/spaces/{space_id}/chats")
-def list_chats(space_id: str) -> dict[str, object]:
+def list_chats(space_id: str, user: dict = Depends(current_user)) -> dict[str, object]:
     _space_row(space_id)
+    assert_space_access(space_id, user)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             "SELECT * FROM chats WHERE space_id=? ORDER BY updated_at DESC", (space_id,)
@@ -257,8 +263,9 @@ def list_chats(space_id: str) -> dict[str, object]:
 
 
 @router.delete("/chats/{chat_id}")
-def delete_chat(chat_id: str) -> dict[str, str]:
-    _get_chat_row(chat_id)
+def delete_chat(chat_id: str, user: dict = Depends(current_user)) -> dict[str, str]:
+    chat = _get_chat_row(chat_id)
+    assert_space_access(chat["space_id"], user)
     with connect(settings.db_path) as conn:
         conn.execute("DELETE FROM chats WHERE id=?", (chat_id,))
     return {"status": "deleted"}
@@ -271,8 +278,9 @@ def _parse_chart(row: dict[str, object]) -> dict[str, object]:
 
 
 @router.get("/chats/{chat_id}/messages")
-def list_messages(chat_id: str) -> dict[str, object]:
-    _get_chat_row(chat_id)
+def list_messages(chat_id: str, user: dict = Depends(current_user)) -> dict[str, object]:
+    chat = _get_chat_row(chat_id)
+    assert_space_access(chat["space_id"], user)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             "SELECT id, role, content, standalone_question, cache_hit, cached_from, cache_kind, cache_match_question, cache_match_score, chart, table_data AS \"table\", created_at, "
@@ -283,16 +291,17 @@ def list_messages(chat_id: str) -> dict[str, object]:
 
 
 @router.get("/messages/{message_id}/trace")
-def message_trace(message_id: str) -> dict[str, object]:
+def message_trace(message_id: str, user: dict = Depends(current_user)) -> dict[str, object]:
     with connect(settings.db_path) as conn:
-        row = conn.execute("SELECT trace FROM messages WHERE id=?", (message_id,)).fetchone()
+        row = conn.execute("SELECT trace, chat_id FROM messages WHERE id=?", (message_id,)).fetchone()
     if row is None or row["trace"] is None:
         raise HTTPException(status_code=404, detail="No trace for this message")
+    assert_space_access(_get_chat_row(row["chat_id"])["space_id"], user)
     return json.loads(row["trace"])
 
 
 @router.get("/messages/{message_id}/vectors")
-def message_vectors(message_id: str) -> dict[str, object]:
+def message_vectors(message_id: str, user: dict = Depends(current_user)) -> dict[str, object]:
     """The vector-space PCA data, computed on demand instead of on every message send —
     see Pipeline.vectors_trace(). Re-embeds the same question query_trace() embedded
     (embedding is deterministic), scoped to the message's own space."""
@@ -306,6 +315,7 @@ def message_vectors(message_id: str) -> dict[str, object]:
     if trace.get("meta"):
         raise HTTPException(status_code=404, detail="No vector space for a conversation-only answer")
     space_id = _get_chat_row(row["chat_id"])["space_id"]
+    assert_space_access(space_id, user)
     try:
         vectors = pipeline.vectors_trace(trace["question"], space_id)
     except UnexpectedResponse as exc:
@@ -318,7 +328,9 @@ def message_vectors(message_id: str) -> dict[str, object]:
 
 
 @router.post("/chats/{chat_id}/messages")
-async def send_message(chat_id: str, request: Request, body: SendMessageRequest) -> StreamingResponse:
+async def send_message(
+    chat_id: str, request: Request, body: SendMessageRequest, user: dict = Depends(current_user)
+) -> StreamingResponse:
     """The full turn, streamed: rewrite -> cache check -> retrieve -> compress -> answer
     (streamed token-by-token) -> persist.
 
@@ -338,14 +350,15 @@ async def send_message(chat_id: str, request: Request, body: SendMessageRequest)
       context-free by construction.
     """
     chat = _get_chat_row(chat_id)
+    assert_space_access(chat["space_id"], user)
     return StreamingResponse(
-        _send_message_events(chat_id, chat["space_id"], body.content, request),
+        _send_message_events(chat_id, chat["space_id"], body.content, request, user["id"]),
         media_type="text/event-stream",
     )
 
 
 async def _send_message_events(
-    chat_id: str, space_id: str, raw_question: str, request: Request
+    chat_id: str, space_id: str, raw_question: str, request: Request, user_id: str
 ) -> AsyncIterator[bytes]:
     """Owns cancellation for the whole turn — one disconnect watcher for the entire
     stream, rather than one per blocking step (each run_in_threadpool call below inherits
@@ -363,7 +376,7 @@ async def _send_message_events(
     token = set_canceller(cancelled.is_set)
     watcher = asyncio.create_task(watch_client())
     try:
-        async for event in _run_turn(chat_id, space_id, raw_question):
+        async for event in _run_turn(chat_id, space_id, raw_question, user_id):
             yield event
     except Cancelled:
         logger.info("Chat message cancelled by client disconnect: %r", raw_question)
@@ -379,7 +392,7 @@ async def _send_message_events(
         reset_canceller(token)
 
 
-async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIterator[bytes]:
+async def _run_turn(chat_id: str, space_id: str, raw_question: str, user_id: str) -> AsyncIterator[bytes]:
     # Loaded before the insert below, so the question being asked right now isn't
     # duplicated into its own history.
     history = await run_in_threadpool(_load_history, chat_id, settings.history_turns)
@@ -390,7 +403,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
     # classified this as a side effect (see Pipeline.route_question), so skip retrieval
     # and answer straight from history.
     if route.is_meta:
-        _insert_message(chat_id, "user", raw_question)
+        _insert_message(chat_id, "user", raw_question, user_id=user_id)
         content = await run_in_threadpool(pipeline.answer_meta, raw_question, history)
         yield _sse({"type": "delta", "text": content})
         # No retrieval stages ran, so this isn't a QueryTrace — just the actual
@@ -407,7 +420,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
             "history": [{"role": role, "content": text} for role, text in history],
             "answer_text": content,
         })
-        assistant_id = _insert_message(chat_id, "assistant", content, trace=meta_trace)
+        assistant_id = _insert_message(chat_id, "assistant", content, user_id=user_id, trace=meta_trace)
         _touch_chat(chat_id)
         yield _sse({"type": "done", "message": _get_message(assistant_id)})
         return
@@ -417,7 +430,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
     # primary question field just falls back to the user's raw words, same as turn 1.
     standalone = route.sub_questions[0] if route.mode == "single" else raw_question
     _insert_message(
-        chat_id, "user", raw_question,
+        chat_id, "user", raw_question, user_id=user_id,
         standalone_question=standalone if history and route.mode == "single" else None,
     )
 
@@ -442,7 +455,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
             cached_trace["timings"] = {"cache": cache_ms}
             cached_trace["tokens"] = {}
             assistant_id = _insert_message(
-                chat_id, "assistant", cached["content"],
+                chat_id, "assistant", cached["content"], user_id=user_id,
                 cache_hit=True, cached_from=cached["id"], trace=json.dumps(cached_trace),
                 chart=cached["chart"], table=cached["table_data"], cache_kind=cached["cache_kind"],
                 cache_match_question=cached["cache_match_question"],
@@ -479,7 +492,7 @@ async def _run_turn(chat_id: str, space_id: str, raw_question: str) -> AsyncIter
     # text NOR a chart/table to show.
     content = answer.get("text") or answer.get("error") or ("" if (chart or table) else pipeline.NO_MATCH)
     assistant_id = _insert_message(
-        chat_id, "assistant", content, trace=json.dumps(trace_dict),
+        chat_id, "assistant", content, user_id=user_id, trace=json.dumps(trace_dict),
         chart=json.dumps(chart) if chart else None,
         table=json.dumps(table) if table else None,
     )

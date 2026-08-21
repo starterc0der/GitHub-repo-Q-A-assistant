@@ -1,7 +1,7 @@
 const API_BASE = "http://localhost:8000";
 
 async function request(path, options) {
-  const res = await fetch(`${API_BASE}${path}`, options);
+  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...options });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${path} failed (${res.status}): ${text}`);
@@ -30,6 +30,31 @@ function del(path) {
   return request(path, { method: "DELETE" });
 }
 
+// ----------------------------------------------------------------------- auth
+
+export const signup = (body) => post("/auth/signup", body);
+export const login = (body) => post("/auth/login", body);
+export const logout = () => post("/auth/logout", {});
+export const me = () => request("/auth/me");
+
+// ---------------------------------------------------------------------- users
+
+export const listUsers = () => request("/users");
+export const updateUserRole = (id, role) => patch(`/users/${id}`, { role });
+export const assignSpace = (userId, spaceId) => post(`/users/${userId}/spaces/${spaceId}`, {});
+export const unassignSpace = (userId, spaceId) => del(`/users/${userId}/spaces/${spaceId}`);
+export const userInsights = (userId, range, turns = {}) => {
+  const params = new URLSearchParams();
+  if (range?.start && range?.end) {
+    params.set("start", range.start);
+    params.set("end", range.end);
+  }
+  if (turns.turns_limit != null) params.set("turns_limit", turns.turns_limit);
+  if (turns.turns_offset != null) params.set("turns_offset", turns.turns_offset);
+  const qs = params.toString();
+  return request(`/users/${userId}/insights${qs ? `?${qs}` : ""}`);
+};
+
 // ------------------------------------------------------------------- spaces
 
 export const listSpaces = () => request("/spaces");
@@ -55,7 +80,7 @@ export async function uploadSource(spaceId, kind, file) {
 // GET + EventSource: polls the source row on the server and streams whatever changed.
 // Reconnect-safe by construction — a refresh just re-attaches to the row's current state.
 export function sourceIngestStream(sourceId, { onProgress, onComplete, onError }) {
-  const es = new EventSource(`${API_BASE}/sources/${sourceId}/ingest/stream`);
+  const es = new EventSource(`${API_BASE}/sources/${sourceId}/ingest/stream`, { withCredentials: true });
   es.onmessage = (e) => {
     const data = JSON.parse(e.data);
     if (data.type === "progress") onProgress(data);
@@ -112,6 +137,7 @@ export async function sendMessage(chatId, content, signal, onDelta) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
+    credentials: "include",
     signal,
   });
   if (!res.ok) {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createSpace, deleteSpace, listSpaces } from "../api.js";
+import { createSpace, deleteSpace, listSpaces, logout } from "../api.js";
 import { AVATAR_BG, AVATAR_INK, ConfirmDialog, timeAgo } from "../components/RagAtoms.jsx";
 
 const COLORS = ["accent", "accent2", "warn", "doc"];
@@ -54,11 +54,12 @@ function CreateSpaceModal({ onClose, onCreated }) {
   );
 }
 
-export function SpacesView({ onOpen }) {
+export function SpacesView({ currentUser, onOpen, onOpenUsers, onLoggedOut }) {
   const [spaces, setSpaces] = useState(null);
   const [error, setError] = useState(null);
   const [showCreate, setShowCreate] = useState(false);
   const [deleteId, setDeleteId] = useState(null);
+  const isAdmin = currentUser?.role === "admin";
 
   function refresh() {
     setError(null);
@@ -90,15 +91,37 @@ export function SpacesView({ onOpen }) {
             <p>Ask your own data</p>
           </div>
         </div>
-        <button className="rag-spaces__new-btn" onClick={() => setShowCreate(true)}>
-          + New space
-        </button>
+        {isAdmin && (
+          <button className="rag-spaces__new-btn" onClick={() => setShowCreate(true)}>
+            + New space
+          </button>
+        )}
         <div>
           <div className="rag-spaces__nav-label">Workspace</div>
-          <div className="rag-spaces__nav-item">
-            <span className="rag-spaces__nav-dot" />
-            All spaces
+          <div className="rag-spaces__nav-list">
+            <button className="rag-spaces__nav-item rag-spaces__nav-item--active">
+              <span className="rag-spaces__nav-dot" />
+              All spaces
+            </button>
+            {isAdmin && (
+              <button className="rag-spaces__nav-item" onClick={onOpenUsers}>
+                <span className="rag-spaces__nav-dot" />
+                Users
+              </button>
+            )}
           </div>
+        </div>
+        <div className="rag-spaces__footer">
+          <div className="rag-spaces__footer-identity">
+            <span className="rag-spaces__footer-avatar">{currentUser?.name?.trim().charAt(0).toUpperCase() || "?"}</span>
+            <span className="rag-spaces__footer-name">{currentUser?.name}</span>
+          </div>
+          <button
+            className="rag-spaces__logout-btn"
+            onClick={() => logout().finally(onLoggedOut)}
+          >
+            Log out
+          </button>
         </div>
       </aside>
 
@@ -145,9 +168,11 @@ export function SpacesView({ onOpen }) {
                     {s.source_count} source{s.source_count === 1 ? "" : "s"}
                   </span>
                   <span className="rag-space-row__time">{timeAgo(s.updated_at)}</span>
-                  <button className="rag-icon-btn rag-space-row__delete" onClick={(e) => handleDelete(e, s.id)}>
-                    ×
-                  </button>
+                  {isAdmin && (
+                    <button className="rag-icon-btn rag-space-row__delete" onClick={(e) => handleDelete(e, s.id)}>
+                      ×
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

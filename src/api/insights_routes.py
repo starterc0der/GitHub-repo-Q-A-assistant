@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from src.api.chat_routes import _get_chat_row
 from src.api.routes import _space_row
+from src.auth import require_admin
 from src.config import settings
 from src.db import connect
 from src.pipeline import Pipeline
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 # Which pipeline stages ever make a real LLM/API call, vs. always-local computation.
 # cache/embed/route/hybrid/rerank use only local models or plain lookups — never the

@@ -7,6 +7,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+  token_version INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS spaces (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -34,6 +44,14 @@ CREATE TABLE IF NOT EXISTS sources (
   ingested_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sources_space ON sources(space_id);
+
+CREATE TABLE IF NOT EXISTS space_members (
+  space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (space_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_space_members_user ON space_members(user_id);
 
 CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
@@ -147,6 +165,8 @@ def init_db(db_path: str) -> None:
             conn.execute("ALTER TABLE messages ADD COLUMN cache_kind TEXT")
             conn.execute("ALTER TABLE messages ADD COLUMN cache_match_question TEXT")
             conn.execute("ALTER TABLE messages ADD COLUMN cache_match_score REAL")
+        if "user_id" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN user_id TEXT REFERENCES users(id)")
         chat_columns = {row["name"] for row in conn.execute("PRAGMA table_info(chats)")}
         if "memory_summary" not in chat_columns:
             conn.execute("ALTER TABLE chats ADD COLUMN memory_summary TEXT NOT NULL DEFAULT ''")

@@ -20,11 +20,11 @@ function fmtMs(ms) {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
 }
 
-function fmtPct(x) {
+export function fmtPct(x) {
   return `${Math.round((x || 0) * 100)}%`;
 }
 
-function fmtDateShort(iso) {
+export function fmtDateShort(iso) {
   return new Date(`${iso}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -83,7 +83,7 @@ function ChartTooltip({ leftPct, topPct, children }) {
 
 // KPI card with a trend sparkline — null days (no questions asked) are dropped before
 // computing the spark/delta so a sparse history doesn't read as "trending toward zero".
-function KpiCard({ label, value, series, color }) {
+export function KpiCard({ label, value, series, color }) {
   const vals = series.filter((v) => v != null);
   const delta = trendDelta(vals);
   const { line, area } = sparkPaths(vals, 120, 34, 4);
@@ -106,7 +106,7 @@ function KpiCard({ label, value, series, color }) {
 // bar, and a row of mini trend bars so the day-to-day shape is visible at a glance.
 // byDay carries the real dates alongside the values (not just a bare number array) so
 // the per-bar hover tooltip can say *which* day, not just "0.62".
-function GaugeCard({ label, valuePct, byDay, field, color, softColor, note, noDataLabel }) {
+export function GaugeCard({ label, valuePct, byDay, field, color, softColor, note, noDataLabel }) {
   const [hoverIdx, setHoverIdx] = useState(null);
   const series = byDay.map((d) => d[field]);
   const vals = series.filter((v) => v != null);
@@ -160,7 +160,7 @@ function GaugeCard({ label, valuePct, byDay, field, color, softColor, note, noDa
 // question list) plus the question-detail overlay, which reuses the existing
 // PipelineOverlay unchanged — same merge-cache-fields-onto-the-trace pattern the chat
 // panel used to do before that view moved here.
-export function useInsightsController(spaceId) {
+export function useInsightsController(spaceId, enabled = true) {
   const [chatId, setChatId] = useState(null);
   const [spaceData, setSpaceData] = useState(null);
   const [chunkData, setChunkData] = useState(null);
@@ -186,12 +186,13 @@ export function useInsightsController(spaceId) {
   }
 
   useEffect(() => {
+    if (!enabled) return; // e.g. a non-admin viewer — insights is an admin-only route
     setChatId(null);
     setChatData(null);
     setRange(null);
     refreshSpace(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [spaceId]);
+  }, [spaceId, enabled]);
 
   function setDateRange(start, end) {
     refreshSpace({ start, end });
@@ -232,7 +233,7 @@ export function useInsightsController(spaceId) {
   };
 }
 
-function StatCard({ label, value, sub }) {
+export function StatCard({ label, value, sub }) {
   return (
     <div className="rag-insight-card">
       <span className="rag-insight-card__label">{label}</span>
@@ -385,7 +386,7 @@ function StageLatencyPanel({ stageLatency }) {
 // traces, not an estimate. A day with zero questions is a genuine 0, not a gap, unlike
 // the gate/cache-hit trends: token usage has no "no data" vs. "data but zero" distinction
 // to preserve.
-function TokenUsageTrend({ tokensByDay, rangeDayCount, rangeStartLabel, rangeEndLabel }) {
+export function TokenUsageTrend({ tokensByDay, rangeDayCount, rangeStartLabel, rangeEndLabel }) {
   const gradientId = useId();
   const [hoverIdx, setHoverIdx] = useState(null);
   const X0 = 40, X1 = 770, Y_TOP = 16, Y_BOTTOM = 176;
@@ -456,7 +457,7 @@ function TokenUsageTrend({ tokensByDay, rangeDayCount, rangeStartLabel, rangeEnd
   );
 }
 
-function DateRangePicker({ range, minDate, maxDate, dayCount, onChange }) {
+export function DateRangePicker({ range, minDate, maxDate, dayCount, onChange }) {
   if (!range) return null;
   return (
     <div className="rag-date-range">

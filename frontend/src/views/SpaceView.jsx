@@ -5,10 +5,11 @@ import { ChatMain, ChatSidebar, useChatController } from "../components/ChatPane
 import { SourcesMain, SourcesSidebar, useSourcesController } from "../components/SourcesPanel.jsx";
 import { InsightsMain, useInsightsController } from "./InsightsView.jsx";
 
-export function SpaceView({ spaceId, onBack }) {
+export function SpaceView({ spaceId, currentUser, onBack }) {
   const [space, setSpace] = useState(null);
   const [error, setError] = useState(null);
   const [tab, setTab] = useState("chat");
+  const isAdmin = currentUser?.role === "admin";
 
   function refresh() {
     setError(null);
@@ -21,7 +22,7 @@ export function SpaceView({ spaceId, onBack }) {
 
   const chat = useChatController(spaceId);
   const sourcesCtl = useSourcesController(spaceId, space?.sources || [], refresh);
-  const insightsCtl = useInsightsController(spaceId);
+  const insightsCtl = useInsightsController(spaceId, isAdmin);
 
   if (error) {
     return (
@@ -48,7 +49,7 @@ export function SpaceView({ spaceId, onBack }) {
       <aside className="rag-space-sidebar">
         <div className="rag-space-sidebar__head">
           <button className="rag-space-sidebar__back" onClick={onBack}>
-            ← Spaces
+            <span className="rag-space-sidebar__back-icon">←</span>Spaces
           </button>
           <div className="rag-space-sidebar__info">
             <span
@@ -68,18 +69,22 @@ export function SpaceView({ spaceId, onBack }) {
             <button className={cls("rag-space-sidebar__tab", tab === "chat" && "rag-space-sidebar__tab--active")} onClick={() => setTab("chat")}>
               Chat
             </button>
-            <button
-              className={cls("rag-space-sidebar__tab", tab === "sources" && "rag-space-sidebar__tab--active")}
-              onClick={() => setTab("sources")}
-            >
-              Sources ({space.sources.length})
-            </button>
-            <button
-              className={cls("rag-space-sidebar__tab", tab === "insights" && "rag-space-sidebar__tab--active")}
-              onClick={() => setTab("insights")}
-            >
-              Insights
-            </button>
+            {isAdmin && (
+              <button
+                className={cls("rag-space-sidebar__tab", tab === "sources" && "rag-space-sidebar__tab--active")}
+                onClick={() => setTab("sources")}
+              >
+                Sources ({space.sources.length})
+              </button>
+            )}
+            {isAdmin && (
+              <button
+                className={cls("rag-space-sidebar__tab", tab === "insights" && "rag-space-sidebar__tab--active")}
+                onClick={() => setTab("insights")}
+              >
+                Insights
+              </button>
+            )}
           </div>
         </div>
         {tab !== "insights" && (
@@ -91,7 +96,7 @@ export function SpaceView({ spaceId, onBack }) {
 
       <div className="rag-space__main">
         {tab === "chat" && <ChatMain {...chat} />}
-        {tab === "sources" && <SourcesMain {...sourcesCtl} />}
+        {tab === "sources" && <SourcesMain {...sourcesCtl} isAdmin={isAdmin} />}
         {tab === "insights" && <InsightsMain spaceId={spaceId} spaceName={space.name} ctl={insightsCtl} />}
       </div>
     </div>

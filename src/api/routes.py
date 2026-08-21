@@ -9,10 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from src.auth import assert_space_access, current_user, require_admin
 from src.config import settings
 from src.db import connect, init_db, new_id, now, sweep_stale_ingests
 from src.pipeline import Pipeline
@@ -64,7 +65,7 @@ def _space_row(space_id: str) -> dict[str, object]:
 
 
 @router.post("/spaces")
-def create_space(request: CreateSpaceRequest) -> dict[str, object]:
+def create_space(request: CreateSpaceRequest, user: dict = Depends(require_admin)) -> dict[str, object]:
     space_id = new_id()
     with connect(settings.db_path) as conn:
         conn.execute(
@@ -72,23 +73,38 @@ def create_space(request: CreateSpaceRequest) -> dict[str, object]:
             "VALUES (?, ?, ?, ?, ?, ?)",
             (space_id, request.name, request.description, request.color, now(), now()),
         )
+        # The admin who created it can use it immediately without a separate assign step.
+        conn.execute(
+            "INSERT INTO space_members (space_id, user_id, created_at) VALUES (?, ?, ?)",
+            (space_id, user["id"], now()),
+        )
     return _space_row(space_id)
 
 
 @router.get("/spaces")
-def list_spaces() -> dict[str, object]:
+def list_spaces(user: dict = Depends(current_user)) -> dict[str, object]:
     with connect(settings.db_path) as conn:
-        rows = conn.execute(
-            "SELECT s.*, COUNT(src.id) AS source_count FROM spaces s "
-            "LEFT JOIN sources src ON src.space_id = s.id "
-            "GROUP BY s.id ORDER BY s.updated_at DESC"
-        ).fetchall()
+        if user["role"] == "admin":
+            rows = conn.execute(
+                "SELECT s.*, COUNT(src.id) AS source_count FROM spaces s "
+                "LEFT JOIN sources src ON src.space_id = s.id "
+                "GROUP BY s.id ORDER BY s.updated_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT s.*, COUNT(src.id) AS source_count FROM spaces s "
+                "JOIN space_members sm ON sm.space_id = s.id AND sm.user_id = ? "
+                "LEFT JOIN sources src ON src.space_id = s.id "
+                "GROUP BY s.id ORDER BY s.updated_at DESC",
+                (user["id"],),
+            ).fetchall()
     return {"spaces": [dict(r) for r in rows]}
 
 
 @router.get("/spaces/{space_id}")
-def get_space(space_id: str) -> dict[str, object]:
+def get_space(space_id: str, user: dict = Depends(current_user)) -> dict[str, object]:
     space = _space_row(space_id)
+    assert_space_access(space_id, user)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
             "SELECT * FROM sources WHERE space_id=? ORDER BY created_at", (space_id,)
@@ -97,7 +113,7 @@ def get_space(space_id: str) -> dict[str, object]:
 
 
 @router.patch("/spaces/{space_id}")
-def update_space(space_id: str, request: UpdateSpaceRequest) -> dict[str, object]:
+def update_space(space_id: str, request: UpdateSpaceRequest, _user: dict = Depends(require_admin)) -> dict[str, object]:
     _space_row(space_id)
     fields = request.model_dump(exclude_unset=True)
     if fields:
@@ -111,7 +127,7 @@ def update_space(space_id: str, request: UpdateSpaceRequest) -> dict[str, object
 
 
 @router.delete("/spaces/{space_id}")
-def delete_space(space_id: str) -> dict[str, str]:
+def delete_space(space_id: str, _user: dict = Depends(require_admin)) -> dict[str, str]:
     _space_row(space_id)
     pipeline.delete_space(space_id)
     with connect(settings.db_path) as conn:
@@ -195,7 +211,7 @@ def _run_ingest_background(
 
 
 @router.get("/spaces/{space_id}/sources")
-def list_sources(space_id: str) -> dict[str, object]:
+def list_sources(space_id: str, _user: dict = Depends(require_admin)) -> dict[str, object]:
     _space_row(space_id)
     with connect(settings.db_path) as conn:
         rows = conn.execute(
@@ -205,7 +221,7 @@ def list_sources(space_id: str) -> dict[str, object]:
 
 
 @router.post("/spaces/{space_id}/sources")
-def create_source(space_id: str, request: CreateSourceRequest) -> dict[str, object]:
+def create_source(space_id: str, request: CreateSourceRequest, _user: dict = Depends(require_admin)) -> dict[str, object]:
     _space_row(space_id)
     if request.kind == "repo":
         if not request.uri:
@@ -227,7 +243,8 @@ def create_source(space_id: str, request: CreateSourceRequest) -> dict[str, obje
 
 @router.post("/spaces/{space_id}/sources/upload")
 async def upload_source(
-    space_id: str, kind: Literal["pdf", "docx", "csv"] = Form(...), file: UploadFile = File(...)
+    space_id: str, kind: Literal["pdf", "docx", "csv"] = Form(...), file: UploadFile = File(...),
+    _user: dict = Depends(require_admin),
 ) -> dict[str, object]:
     _space_row(space_id)
     source_id = new_id()
@@ -250,7 +267,7 @@ async def upload_source(
 
 
 @router.delete("/sources/{source_id}")
-def delete_source(source_id: str) -> dict[str, str]:
+def delete_source(source_id: str, _user: dict = Depends(require_admin)) -> dict[str, str]:
     row = _get_source_row(source_id)
     pipeline.delete_source(row["space_id"], source_id)
     with connect(settings.db_path) as conn:
@@ -261,7 +278,7 @@ def delete_source(source_id: str) -> dict[str, str]:
 
 
 @router.get("/sources/{source_id}/trace")
-def source_trace(source_id: str) -> dict[str, object]:
+def source_trace(source_id: str, _user: dict = Depends(require_admin)) -> dict[str, object]:
     row = _get_source_row(source_id)
     if not row["ingest_trace"]:
         raise HTTPException(status_code=404, detail="Not ingested yet")
@@ -269,7 +286,7 @@ def source_trace(source_id: str) -> dict[str, object]:
 
 
 @router.get("/sources/{source_id}/ingest/stream")
-def source_ingest_stream(source_id: str) -> StreamingResponse:
+def source_ingest_stream(source_id: str, _user: dict = Depends(require_admin)) -> StreamingResponse:
     """Reconnect-safe by construction: it polls the sources row rather than owning the
     ingest work (a background thread does that), so a mid-ingest page refresh just
     re-attaches to whatever progress is already recorded."""

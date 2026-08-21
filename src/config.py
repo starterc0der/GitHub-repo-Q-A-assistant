@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # fresh checkout fails loudly on first connector use instead of silently storing
     # plaintext — there's no safe default to ship here.
     connector_encryption_key: str = ""
+    # Signs login JWTs (see src/auth.py). Generate with: python3 -c "import secrets;
+    # print(secrets.token_hex(32))" and put it in .env. Empty by default for the same
+    # reason as connector_encryption_key — fail loudly on first login rather than sign
+    # tokens with a guessable default.
+    jwt_secret: str = ""
     chunk_max_chars: int = 2000
     chunk_overlap: int = 200
     # How many prior turns (user+assistant pairs) are sent to the LLM as chat history.

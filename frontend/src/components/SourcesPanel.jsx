@@ -193,7 +193,7 @@ function TextModal({ spaceId, onClose, onAdded }) {
   );
 }
 
-function SourceDetailModal({ source, onClose, onDelete, onViewBreakdown }) {
+function SourceDetailModal({ source, isAdmin, onClose, onDelete, onViewBreakdown }) {
   return (
     <div className="rag-modal-backdrop" onClick={onClose}>
       <div className="rag-modal-card" onClick={(e) => e.stopPropagation()}>
@@ -225,10 +225,12 @@ function SourceDetailModal({ source, onClose, onDelete, onViewBreakdown }) {
           </div>
         )}
         <div className="rag-modal-card__actions">
-          <button type="button" className="rag-btn rag-btn--ghost" style={{ color: "var(--warn-ink)" }} onClick={() => onDelete(source.id)}>
-            Remove source
-          </button>
-          {source.has_trace && (
+          {isAdmin && (
+            <button type="button" className="rag-btn rag-btn--ghost" style={{ color: "var(--warn-ink)" }} onClick={() => onDelete(source.id)}>
+              Remove source
+            </button>
+          )}
+          {isAdmin && source.has_trace && (
             <button type="button" className="rag-btn rag-btn--ghost" onClick={onViewBreakdown}>
               View ingestion breakdown
             </button>
@@ -334,7 +336,7 @@ export function SourcesSidebar({ filter, setFilter, counts, sources }) {
 export function SourcesMain({
   spaceId, sources, filtered, modal, setModal, detailSource, setDetailId, breakdown, setBreakdown,
   loadingBreakdown, uploading, uploadError, fileRef, handleFile, handleDelete, deleteId, setDeleteId, confirmDelete,
-  openBreakdown, onRefresh,
+  openBreakdown, onRefresh, isAdmin = true,
 }) {
   return (
     <div className="rag-sources__main">
@@ -346,18 +348,20 @@ export function SourcesMain({
               {filtered.length} of {sources.length} source{sources.length === 1 ? "" : "s"}
             </p>
           </div>
-          <div className="rag-sources__actions">
-            <button className="rag-btn rag-btn--ghost" onClick={() => setModal("repo")}>
-              Connect GitHub repo
-            </button>
-            <button className="rag-btn rag-btn--ghost" onClick={() => fileRef.current?.click()} disabled={uploading}>
-              {uploading ? "Uploading…" : "Upload PDF/Doc/CSV"}
-            </button>
-            <input ref={fileRef} type="file" accept=".pdf,.docx,.csv" hidden onChange={handleFile} />
-            <button className="rag-btn" onClick={() => setModal("text")}>
-              Paste text
-            </button>
-          </div>
+          {isAdmin && (
+            <div className="rag-sources__actions">
+              <button className="rag-btn rag-btn--ghost" onClick={() => setModal("repo")}>
+                Connect GitHub repo
+              </button>
+              <button className="rag-btn rag-btn--ghost" onClick={() => fileRef.current?.click()} disabled={uploading}>
+                {uploading ? "Uploading…" : "Upload PDF/Doc/CSV"}
+              </button>
+              <input ref={fileRef} type="file" accept=".pdf,.docx,.csv" hidden onChange={handleFile} />
+              <button className="rag-btn" onClick={() => setModal("text")}>
+                Paste text
+              </button>
+            </div>
+          )}
         </div>
         {uploadError && <p className="rag-error">{uploadError}</p>}
 
@@ -385,6 +389,7 @@ export function SourcesMain({
       {detailSource && (
         <SourceDetailModal
           source={detailSource}
+          isAdmin={isAdmin}
           onClose={() => setDetailId(null)}
           onDelete={handleDelete}
           onViewBreakdown={openBreakdown}
