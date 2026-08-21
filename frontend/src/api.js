@@ -150,7 +150,12 @@ export async function sendMessage(chatId, content, signal, onDelta) {
   let buffer = "";
   let message = null;
 
-  while (true) {
+  // Exit on the "done"/"error" event itself, not on the transport stream closing —
+  // waiting for reader.read() to report done:true left this hung for 1-2 minutes
+  // (matching a proxy/keep-alive idle timeout) on turns where the connection lingered
+  // open a moment after the backend had already sent its final frame, even though the
+  // answer had fully arrived and there was nothing left to read.
+  outer: while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -160,9 +165,10 @@ export async function sendMessage(chatId, content, signal, onDelta) {
       if (!frame.startsWith("data: ")) continue;
       const event = JSON.parse(frame.slice("data: ".length));
       if (event.type === "delta") onDelta?.(event.text);
-      else if (event.type === "done") message = event.message;
+      else if (event.type === "done") { message = event.message; break outer; }
       else if (event.type === "error") throw new Error(event.message);
     }
   }
+  reader.cancel().catch(() => {}); // release the connection now that we're done reading it
   return message;
 }

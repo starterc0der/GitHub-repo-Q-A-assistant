@@ -45,7 +45,11 @@ LIVE_DATA_SYSTEM_PROMPT = (
     'prose) of this exact JSON shape: {"columns": [...], "rows": [[...], ...]}, one row '
     "per sub-place, values as plain numbers or short strings, same column order in "
     "every row. Only skip the table if the user's question explicitly asks for a list, "
-    "a single number, or some other specific format instead.\n"
+    "a single number, or some other specific format instead. When you do emit a table, "
+    "the table IS the answer — do not also write the same readings out again as a "
+    "bullet list or sentences; any prose alongside a table must add something the table "
+    "doesn't already show (e.g. a one-line takeaway or a note about a missing "
+    "sub-place), never repeat a row's values in a different format.\n"
     "2. Never call it a 'point' — it's a sub-place. Label each row's location as "
     "'<location> (<inlet or outlet>)', e.g. 'ESR (inlet)', 'Deer_Park (outlet)' — never "
     "'inlet at ESR' or similar.\n"
