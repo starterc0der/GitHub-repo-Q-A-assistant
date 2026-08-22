@@ -77,7 +77,11 @@ function MessageBubble({ message }) {
 }
 
 export function useChatController(spaceId) {
-  const [chats, setChats] = useState([]);
+  // null = not fetched yet for this space (renders ChatSidebar's skeleton); [] = fetched,
+  // genuinely no chats. Without the null state the sidebar briefly rendered a blank gap
+  // below "+ New chat" while the first listChats() call was in flight — an empty-looking
+  // flash easy to mistake for a glitch rather than a loading state.
+  const [chats, setChats] = useState(null);
   const [activeChatId, setActiveChatId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
@@ -98,6 +102,7 @@ export function useChatController(spaceId) {
   useEffect(() => {
     setActiveChatId(null);
     setMessages([]);
+    setChats(null);
     refreshChats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spaceId]);
@@ -182,24 +187,28 @@ export function ChatSidebar({ chats, activeChatId, setActiveChatId, handleNewCha
         <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> New chat
       </button>
       <div className="rag-chat__list">
-        {chats.map((c) => (
-          <div
-            key={c.id}
-            className={cls("rag-chat__item", c.id === activeChatId && "rag-chat__item--active")}
-            onClick={() => setActiveChatId(c.id)}
-          >
-            <span className="rag-chat__item-title">{c.title}</span>
-            <button
-              className="rag-icon-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeleteChatId(c.id);
-              }}
+        {chats === null ? (
+          <p className="rag-hint" style={{ padding: "8px 4px" }}>Loading…</p>
+        ) : (
+          chats.map((c) => (
+            <div
+              key={c.id}
+              className={cls("rag-chat__item", c.id === activeChatId && "rag-chat__item--active")}
+              onClick={() => setActiveChatId(c.id)}
             >
-              ×
-            </button>
-          </div>
-        ))}
+              <span className="rag-chat__item-title">{c.title}</span>
+              <button
+                className="rag-icon-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteChatId(c.id);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))
+        )}
       </div>
 
       {deleteChatId && (

@@ -107,6 +107,45 @@ def test_find_matching_places_ignores_stopwords_in_overlap_scoring() -> None:
     assert matches == []
 
 
+def test_find_matching_places_does_not_strong_match_on_a_shared_generic_inlet_label() -> None:
+    # Regression: "UGR-1" (like "ESR") is a generic inlet-location label shared by many
+    # unrelated zones — but unlike "ESR" it tokenizes to TWO words ("ugr","1"), so a bare
+    # mention of it already scored 2 on its own, false-matching every other zone whose
+    # inlet also happens to sit at a UGR-1 — confirmed live: a question about Malisahi's
+    # own UGR-1 inlet pulled in Zone_46_Sartol/Zone_15_Killa_Head_Works/Zone_27_Ranihat
+    # purely because they're ALSO on a UGR-1, nothing else in the question overlapped.
+    text = (
+        "## Zone_46_Sartol\nULB: cuttack\nInlet: device_id=A8-74-1D-16-71-96, pid=961, location=UGR-1\n"
+        "- device_id=A8-74-1D-16-71-96, pid=962, sub_place=Nua_Pada\n"
+        "## Malisahi\nULB: bhubaneswar\nInlet: device_id=2C-CF-67-12-75-F9, pid=F92, location=UGR-1\n"
+        "- device_id=2C-CF-67-12-75-F9, pid=F92, sub_place=Lalchand_Line\n"
+    )
+    places = parse_place_blocks(text)
+
+    matches = find_matching_places("give me the latest sensor readings for the Malisahi UGR-1 inlet", places)
+
+    assert [p.place_name for p in matches] == ["Malisahi"]
+
+
+def test_find_matching_places_ignores_enumeration_digits_in_sub_place_names() -> None:
+    # Regression: "Line" (from the question's own "Lalchand_Line") plus a coincidental
+    # "1" (from "UGR-1" elsewhere in the question) crossed the threshold against an
+    # unrelated "Master_Line_for_SDMA_1_2_3" sub-place purely via its enumeration digits.
+    text = (
+        "## Zone_29_Khan_Nagar\nULB: cuttack\nInlet: device_id=00-80-F4-2A-D4-EE, pid=EE1, location=ESR\n"
+        "- device_id=00-80-F4-2A-D4-EE, pid=EE1, sub_place=Master_Line_for_SDMA_1_2_3\n"
+        "## Malisahi\nULB: bhubaneswar\nInlet: device_id=2C-CF-67-12-75-F9, pid=F92, location=UGR-1\n"
+        "- device_id=2C-CF-67-12-75-F9, pid=F92, sub_place=Lalchand_Line\n"
+    )
+    places = parse_place_blocks(text)
+
+    matches = find_matching_places(
+        "give me the latest sensor readings for the Malisahi UGR-1 inlet and Lalchand_Line", places
+    )
+
+    assert [p.place_name for p in matches] == ["Malisahi"]
+
+
 def test_find_matching_places_matches_on_sub_place_name() -> None:
     places = parse_place_blocks(SAMPLE_TEXT)
 
@@ -129,6 +168,28 @@ def test_find_matching_places_supports_asking_about_more_than_one_place() -> Non
     matches = find_matching_places("compare Zone_11_Gorakabar and Zone_16_Killa", places)
 
     assert {p.place_name for p in matches} == {"Zone_11_Gorakabar", "Zone_16_Killa"}
+
+
+def test_find_matching_places_tolerates_a_one_letter_typo_in_a_place_name() -> None:
+    # Regression: "give me latest data of malasahi" (a real user typo for "Malisahi")
+    # scored 0 under plain exact-token overlap and fell all the way through to a
+    # generic "couldn't find that" answer instead of the live-data lookup.
+    text = "## Malisahi\nULB: bhubaneswar\nInlet: device_id=AA-BB, pid=1, location=UGR-1\n"
+    places = parse_place_blocks(text)
+
+    matches = find_matching_places("give me latest data of malasahi", places)
+
+    assert [p.place_name for p in matches] == ["Malisahi"]
+
+
+def test_find_matching_places_does_not_fuzzy_match_short_unrelated_words() -> None:
+    # The fuzzy path only applies to longer tokens — "zone" (4 letters) must not
+    # loosely match an unrelated short word and manufacture a false-positive place hit.
+    places = parse_place_blocks(SAMPLE_TEXT)
+
+    matches = find_matching_places("what does zore mean", places)
+
+    assert matches == []
 
 
 def test_find_matching_places_returns_empty_list_when_nothing_overlaps() -> None:

@@ -144,6 +144,20 @@ export function RetrievalSections({ data, visible }) {
   const isSequential = data.decompose_mode === "sequential";
   const hopLabel = (n) => (isSequential ? `Hop ${n}` : `Q${n}`);
   const chunkById = new Map((data.final_chunks || []).map((f) => [f.chunk.id, f.chunk]));
+  // Citations on a live-data answer point at a synthetic chunk (see
+  // Pipeline._try_live_data_answer) wrapping the tool's fetched-readings context —
+  // it never went through retrieval, so it's not in final_chunks above. Without this,
+  // a fully-verified live-data claim rendered with no source tag at all, indistinguishable
+  // from an unsupported one, which read as "no tool was called" even though it was.
+  if (data.live_data_tool) {
+    const id = `live-data:${data.space_id}`;
+    chunkById.set(id, {
+      id, space_id: data.space_id, source_id: "", file_path: "Live data tool (Redis)",
+      language: "text", symbol_name: null, start_line: 1,
+      end_line: data.live_data_tool.context.split("\n").length,
+      code: data.live_data_tool.context, context_header: "",
+    });
+  }
 
   return (
     <Fragment>

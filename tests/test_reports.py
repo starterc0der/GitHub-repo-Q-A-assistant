@@ -233,6 +233,61 @@ def test_fetch_report_data_redirects_totalizer_monthly_to_summed_daily(mock_conn
 
 
 @patch("src.connectors.reports.psycopg2.connect")
+def test_fetch_report_data_daily_backfills_todays_missing_rollup_from_hourly(
+    mock_connect: MagicMock, monkeypatch
+) -> None:
+    # Today's daily rollup is only written once the day completes — a window that
+    # includes today would otherwise silently have no row for it (and get dropped from
+    # a chart's category intersection downstream). Backfilled as the average of
+    # whatever hours have landed so far.
+    space_id = _make_space_with_postgres_connector()
+
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 8, 21)
+
+    monkeypatch.setattr("src.connectors.reports.date", _FixedDate)
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [(date(2026, 8, 20), 2.63)]  # yesterday's real rollup
+    mock_cursor.fetchone.return_value = ({"00:00": 2.0, "01:00": 4.0},)  # today's partial hourly
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+    window = ReportWindow("pressure", "daily", date(2026, 8, 20), date(2026, 8, 21))
+
+    reports = fetch_report_data(space_id, [DevicePoint("inlet", "AA-BB", "FC1", "ESR")], window)
+
+    assert reports[0].values == {"2026-08-20": 2.63, "2026-08-21": 3.0}
+
+
+@patch("src.connectors.reports.psycopg2.connect")
+def test_fetch_report_data_daily_skips_totalizer_backfill(mock_connect: MagicMock, monkeypatch) -> None:
+    # A totalizer's daily value isn't an average of its hourly readings (confirmed
+    # against real data — it's off by roughly 2x), so there's no safe way to
+    # approximate it before the real rollup lands.
+    space_id = _make_space_with_postgres_connector()
+
+    class _FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 8, 21)
+
+    monkeypatch.setattr("src.connectors.reports.date", _FixedDate)
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = [(date(2026, 8, 20), 1.43)]
+    mock_conn.cursor.return_value = mock_cursor
+    mock_connect.return_value = mock_conn
+    window = ReportWindow("totalizer", "daily", date(2026, 8, 20), date(2026, 8, 21))
+
+    reports = fetch_report_data(space_id, [DevicePoint("inlet", "AA-BB", "FC1", "ESR")], window)
+
+    assert reports[0].values == {"2026-08-20": 1.43}
+    assert mock_cursor.execute.call_count == 1  # no hourly backfill query attempted
+
+
+@patch("src.connectors.reports.psycopg2.connect")
 def test_fetch_report_data_returns_none_on_connection_failure(mock_connect: MagicMock) -> None:
     space_id = _make_space_with_postgres_connector()
     mock_connect.side_effect = ConnectionError("boom")

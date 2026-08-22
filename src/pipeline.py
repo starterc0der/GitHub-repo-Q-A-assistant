@@ -37,7 +37,7 @@ from src.generate.decomposer import DecomposeResult, QueryDecomposer
 from src.generate.faithfulness import FaithfulnessChecker, FaithfulnessResult
 from src.generate.intent import BroadIntentClassifier, matches_broad_keywords
 from src.generate.memory import ConversationMemory
-from src.generate.provenance import ClaimAttributor
+from src.generate.provenance import ClaimAttributor, ClaimCitation
 from src.generate.sufficiency import SufficiencyChecker
 from src.generate.rewriter import StandaloneRewriter
 from src.index.chunk_index import ChunkIndex
@@ -87,6 +87,28 @@ def _add_usage(totals: dict[str, int], usage: dict | None) -> None:
         return
     totals["prompt_tokens"] = totals.get("prompt_tokens", 0) + usage.get("prompt_tokens", 0)
     totals["completion_tokens"] = totals.get("completion_tokens", 0) + usage.get("completion_tokens", 0)
+
+
+def _table_as_claims_text(table: dict) -> str:
+    """Renders a live-data ```table block back into claim-shaped sentences for
+    ClaimAttributor — the numeric readings live in the table now (see
+    LIVE_DATA_SYSTEM_PROMPT's anti-duplication rule), so a faithfulness check that only
+    looked at the prose `text` would verify little more than a one-line aside and never
+    touch the actual pressure/flow/totalizer values a live-data answer exists to report.
+    Only numeric cells become claims — a placeholder ("unavailable", "N/A", "") is the
+    model honestly reporting a metric that doesn't apply here (e.g. "level" only exists
+    on an inlet's reading, never an outlet's — see build_live_data_context), not a fact
+    needing grounding, and checking it anyway flagged every one as unsupported since the
+    context only ever states a metric's presence, never its absence."""
+    lines = []
+    for row in table["rows"]:
+        pairs = ", ".join(
+            f"{col}={val}" for col, val in zip(table["columns"][1:], row[1:])
+            if isinstance(val, (int, float))
+        )
+        if pairs:
+            lines.append(f"{row[0]}: {pairs}")
+    return "\n".join(lines)
 
 
 @dataclass
@@ -635,7 +657,7 @@ class Pipeline:
 
     def _try_live_data_answer(
         self, question: str, space_id: str, chunks: list[CodeChunk]
-    ) -> tuple[str, dict | None, LiveDataToolTrace] | None:
+    ) -> tuple[str, dict | None, LiveDataToolTrace, list[ClaimCitation]] | None:
         """Answers a live-data question (see DecomposeResult.wants_live_data) directly
         from Redis instead of the normal chunk-grounded generation. `chunks` should be
         the final_chunks PLUS the raw hybrid-search candidates (see
@@ -645,9 +667,14 @@ class Pipeline:
         wide-fallback path after the wrong (huge) source entirely, leaving final_chunks
         empty even though hybrid search's own per-chunk candidates found the right one
         fine. Fetches each matched place's live readings and narrates them.
-        Returns (text, table) — table is the parsed ```table block (see
-        live_data.TableParser) when the model emitted one, else None; the answer prompt
-        defaults to a table unless the question explicitly asked for something else.
+        Returns (text, table, tool_trace, citations) — table is the parsed ```table block
+        (see live_data.TableParser) when the model emitted one, else None; the answer
+        prompt defaults to a table unless the question explicitly asked for something
+        else. citations comes from the same ClaimAttributor used on the normal
+        chunk-grounded path, run against a synthetic chunk wrapping the fetched-readings
+        context instead of a real retrieved chunk — this is the only LLM-narrated tool
+        answer (report answers are built in code, not generated), so it's the only one
+        that can actually misstate a reading and needs checking.
 
         Returns None (never raises) for anything that means "can't answer this live" —
         no place-doc chunk among what was retrieved, no place name match, no Redis
@@ -674,13 +701,23 @@ class Pipeline:
         except RuntimeError:
             return None
         text, table = extract_table(reply)
+        context_chunk = CodeChunk(
+            id=f"live-data:{space_id}", space_id=space_id, source_id="",
+            file_path="Live data tool (Redis)", language="text", symbol_name=None,
+            start_line=1, end_line=context.count("\n") + 1, code=context,
+        )
+        # A table answer's real numeric content lives in `table`, not `text` (see
+        # LIVE_DATA_SYSTEM_PROMPT's anti-duplication rule) — check both, or the readings
+        # that are the actual point of the answer never get verified at all.
+        checkable_text = f"{text}\n{_table_as_claims_text(table)}".strip() if table else text
+        citations = self.claim_attributor.attribute(checkable_text, [context_chunk])
         tool_trace = LiveDataToolTrace(
             matched_places=[p.place_name for p in answerable],
             redis_keys=list(readings.keys()),
             readings=readings,
             context=context,
         )
-        return text, table, tool_trace
+        return text, table, tool_trace, citations
 
     def _try_report_answer(
         self, question: str, space_id: str, chunks: list[CodeChunk], wants_chart: bool = False,
@@ -1408,8 +1445,11 @@ class Pipeline:
         live_tool_trace = None
         report_tool_trace = None
         if live_result is not None:
-            live_text, live_table, live_tool_trace = live_result
-            answer_trace = AnswerTrace(text=live_text, model=self.settings.llm_model, live_data=True, table=live_table)
+            live_text, live_table, live_tool_trace, live_citations = live_result
+            answer_trace = AnswerTrace(
+                text=live_text, model=self.settings.llm_model, live_data=True, table=live_table,
+                citations=live_citations,
+            )
         elif report_result is not None:
             report_text, report_table, report_chart, report_tool_trace = report_result
             answer_trace = AnswerTrace(
@@ -1478,10 +1518,13 @@ class Pipeline:
         live_tool_trace = None
         report_tool_trace = None
         if live_result is not None:
-            live_text, live_table, live_tool_trace = live_result
+            live_text, live_table, live_tool_trace, live_citations = live_result
             generate_started = time.monotonic()
             yield live_text
-            answer_trace = AnswerTrace(text=live_text, model=self.settings.llm_model, live_data=True, table=live_table)
+            answer_trace = AnswerTrace(
+                text=live_text, model=self.settings.llm_model, live_data=True, table=live_table,
+                citations=live_citations,
+            )
             state.timings["generate"] = (time.monotonic() - generate_started) * 1000
             _add_usage(state.tokens, self.llm.last_usage)
             _add_usage(state.tokens, self.bulk_llm.last_usage)

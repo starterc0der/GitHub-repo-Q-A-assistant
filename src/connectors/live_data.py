@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 import redis
 
@@ -169,9 +170,16 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 # question on "to" (boilerplate connector, plus leftover from date-phrase stripping)
 # PLUS a coincidental "8" (from "Zone 08", nothing to do with the road's own numbering),
 # crossing the match threshold together where neither alone would have.
+# "sub"/"dma" are the same failure mode from a domain-specific angle: nearly every CTC
+# sub-place name follows the pattern "SUB_DMA_<n>_<actual name>", so a standalone-rewrite
+# question mentioning "sub-places" plus any coincidental digit elsewhere in the question
+# (e.g. "UGR-1") crossed the match threshold against every OTHER zone's sub-places too —
+# confirmed live: "...its UGR-1 inlet and all sub-places (...)" matched four unrelated
+# zones purely via their "SUB_DMA_1_..." outlets.
 _STOPWORDS = frozenset({
     "a", "an", "the", "of", "for", "in", "and", "or", "to", "at", "is", "on", "with",
     "from", "by", "this", "that", "it", "as", "be", "are", "was", "were",
+    "sub", "dma",
 })
 
 
@@ -189,6 +197,43 @@ def _tokens(text: str) -> set[str]:
 
 def _normalized(text: str) -> str:
     return _NON_ALNUM_RE.sub("", text.lower())
+
+
+_FUZZY_MIN_LEN = 5  # below this, a 1-letter difference is too likely an unrelated word
+_FUZZY_MIN_RATIO = 0.84  # tolerates one substitution/transposition on a 5-6 letter word
+
+
+def _location_tokens(text: str) -> set[str]:
+    """Same as _tokens, minus bare-digit tokens — a sub-place/inlet location's embedded
+    enumeration digits ("UGR-1" -> "ugr"+"1", "Line_1", "SDMA_1_2_3") carry no
+    identifying signal on their own but inflate overlap scoring enough to cross the
+    match threshold: confirmed live, a question mentioning its own place's "UGR-1" inlet
+    false-matched every OTHER zone whose inlet also happens to sit at a UGR-1 (a shared
+    generic label, same failure class as "ESR" — it just happens to tokenize to two
+    words instead of one), and separately "Line" + a coincidental "1" cross-matched an
+    unrelated "Master_Line_for_SDMA_1_2_3" sub-place. A PLACE's own zone number (e.g.
+    "Zone_08") is a legitimate way to refer to it and must keep its digit — this is only
+    used for location tokens, never place-name tokens."""
+    return {t for t in _tokens(text) if not t.isdigit()}
+
+
+def _fuzzy_matched(name_tokens: set[str], q_tokens: set[str]) -> set[str]:
+    """The subset of name_tokens present in q_tokens — exact match, or a typo-tolerant
+    close match on longer words (e.g. "malasahi" for "Malisahi", confirmed as a real
+    user typo) — so a single misspelled letter in an otherwise-unambiguous place name
+    doesn't fall all the way through to a generic no-match answer. Short tokens skip the
+    fuzzy path entirely: "zone"/"esr"-length words routinely differ by one letter from a
+    completely unrelated word without being a typo of each other."""
+    matched = set()
+    for name_tok in name_tokens:
+        if name_tok in q_tokens:
+            matched.add(name_tok)
+        elif len(name_tok) >= _FUZZY_MIN_LEN and any(
+            len(qt) >= _FUZZY_MIN_LEN and SequenceMatcher(None, name_tok, qt).ratio() >= _FUZZY_MIN_RATIO
+            for qt in q_tokens
+        ):
+            matched.add(name_tok)
+    return matched
 
 
 def find_matching_places(question: str, places: list[PlaceDevices]) -> list[PlaceDevices]:
@@ -222,11 +267,12 @@ def find_matching_places(question: str, places: list[PlaceDevices]) -> list[Plac
     scored: dict[str, tuple[int, PlaceDevices]] = {}
     for place in places:
         place_tokens = _tokens(place.place_name)
-        score = len(q_tokens & place_tokens)
-        if place_tokens and place_tokens <= q_tokens:
+        matched_place_tokens = _fuzzy_matched(place_tokens, q_tokens)
+        score = len(matched_place_tokens)
+        if place_tokens and matched_place_tokens == place_tokens:
             score = max(score, 10)
         for point in place.points:
-            loc_tokens = _tokens(point.location)
+            loc_tokens = _location_tokens(point.location)
             score = max(score, len(q_tokens & loc_tokens))
             device_id_normalized = _normalized(point.device_id)
             if device_id_normalized and device_id_normalized in q_normalized:

@@ -195,8 +195,9 @@ class AnswerTrace:
     # exist only for the pipeline trace view.
     citations: list[ClaimCitation] = field(default_factory=list)
     # True when this answer came from Pipeline._try_live_data_answer (a Redis lookup via
-    # a place/device doc match) instead of the normal chunk-grounded generation — no
-    # citations exist on this path since there's no chunk to attribute claims to.
+    # a place/device doc match) instead of the normal chunk-grounded generation.
+    # citations here come from the same ClaimAttributor, run against a synthetic chunk
+    # wrapping the fetched-readings context rather than a real retrieved chunk.
     live_data: bool = False
     # {"columns": [...], "rows": [[...], ...]} — set when a live-data answer emitted a
     # ```table block (see live_data.TableParser). Same shape/lifecycle as chart above,

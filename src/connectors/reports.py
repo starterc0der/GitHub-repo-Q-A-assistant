@@ -200,6 +200,28 @@ def _fetch_one(cur, point: DevicePoint, metric: str, window: ReportWindow) -> Po
             (point.device_id, point.pid, point.device_type, window.start_date, window.end_date),
         )
         values = {d.isoformat(): v for d, v in cur.fetchall()}
+        today = date.today()
+        if (
+            metric != "totalizer"  # cumulative counter — its daily value isn't an average
+            # of hourly readings (confirmed against real data), so there's no safe way to
+            # approximate it before the real rollup lands.
+            and window.start_date <= today <= window.end_date
+            and today.isoformat() not in values
+        ):
+            # Today's own daily row is only written once the day completes — a window
+            # that legitimately includes today would otherwise silently drop it (see
+            # build_report_block's chart-category intersection). Approximate it as the
+            # average of whatever hours have landed so far.
+            cur.execute(
+                f"SELECT value_json FROM {metric}_hourly "  # noqa: S608
+                "WHERE device_id=%s AND pid=%s AND type=%s AND metric_date=%s",
+                (point.device_id, point.pid, point.device_type, today),
+            )
+            row = cur.fetchone()
+            if row and row[0]:
+                readings = list(row[0].values())
+                if readings:
+                    values[today.isoformat()] = sum(readings) / len(readings)
     elif granularity in ("hourly", "5min"):
         cur.execute(
             f"SELECT metric_date, value_json FROM {table} "  # noqa: S608
